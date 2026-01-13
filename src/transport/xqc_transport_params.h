@@ -98,6 +98,7 @@ typedef enum {
  * them as uint64_t macros so they survive on every compiler regardless
  * of /std:c11 mode. */
 #define XQC_TRANSPORT_PARAM_INIT_MAX_PATH_ID_V10 ((uint64_t)0x0f739bbc1b666d09ULL)
+#define XQC_TRANSPORT_PARAM_INIT_MAX_PATH_ID_V3E ((uint64_t)0x3eULL)
 #define XQC_TRANSPORT_PARAM_PMTUD_OPTIONS        ((uint64_t)0x0e08a234ff112300ULL)
 
 
