@@ -321,6 +321,13 @@ xqc_server_set_conn_settings(xqc_engine_t *engine, const xqc_conn_settings_t *se
      * tests/unittest/xqc_set_conn_settings_test.c pins it. */
     engine->default_conn_settings.defer_send_flush = settings->defer_send_flush;
 
+    /* Same field-by-field hazard as defer_send_flush above: without this
+     * line a server that asked for a bounded H3 receive buffer silently
+     * keeps buffering without limit. 0 (unset) copies through unchanged, so
+     * the default stays a no-op. */
+    engine->default_conn_settings.h3_recv_body_buf_max =
+        settings->h3_recv_body_buf_max;
+
 #ifdef XQC_ENABLE_FEC
     engine->default_conn_settings.enable_encode_fec = settings->enable_encode_fec;
     if (engine->default_conn_settings.enable_encode_fec) {

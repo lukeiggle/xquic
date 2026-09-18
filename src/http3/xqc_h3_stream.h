@@ -81,6 +81,14 @@ typedef enum {
     XQC_HTTP3_STREAM_FLAG_ACTIVELY_CLOSED = 0x1000,
     /* FIN was sent and no data will be sent any more */
     XQC_HTTP3_STREAM_FLAG_FIN_SENT = 0x2000,
+    /* XQC_HTTP3_STREAM_FLAG_RECV_PAUSED indicates that the request's
+       unconsumed body buffer reached conn_settings.h3_recv_body_buf_max, so
+       the stream must not read further transport data until the application
+       drains below half that value. Latched (not recomputed per read) so the
+       hysteresis gap between the two watermarks is honoured. Only ever set
+       while h3_recv_body_buf_max is non-zero, and released by the next
+       xqc_h3_request_recv_body() if that setting has since become 0. */
+    XQC_HTTP3_STREAM_FLAG_RECV_PAUSED = 0x4000,
 } xqc_h3_stream_flag;
 
 typedef struct xqc_h3_stream_pctx_s {
@@ -213,6 +221,12 @@ xqc_int_t xqc_h3_stream_send_setting(xqc_h3_stream_t *h3s,
 xqc_int_t xqc_h3_stream_send_goaway(xqc_h3_stream_t *h3s, uint64_t push_id, uint8_t fin);
 
 xqc_int_t xqc_h3_stream_process_blocked_stream(xqc_h3_stream_t *h3s);
+
+/* Entry point for inbound bytes already read off the transport stream. Also
+   the seam the http3 unit tests drive directly, so that they can exercise the
+   frame pipeline without a socket. */
+xqc_int_t xqc_h3_stream_process_in(xqc_h3_stream_t *h3s, unsigned char *data,
+                                   size_t data_len, xqc_bool_t fin_flag);
 
 xqc_var_buf_t *xqc_h3_stream_get_send_buf(xqc_h3_stream_t *h3s);
 

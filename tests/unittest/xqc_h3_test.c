@@ -19,8 +19,6 @@
 
 ssize_t xqc_h3_stream_write_data_to_buffer(xqc_h3_stream_t *h3s, unsigned char *data, uint64_t data_size, uint8_t fin);
 xqc_int_t xqc_decoder_copy_header(xqc_http_header_t *hdr, xqc_var_buf_t *name, xqc_var_buf_t *value);
-/* not exposed in xqc_h3_stream.h, but stable file-scope entry used by tests */
-xqc_int_t xqc_h3_stream_process_in(xqc_h3_stream_t *h3s, unsigned char *data, size_t data_len, xqc_bool_t fin_flag);
 
 
 ssize_t
@@ -1029,7 +1027,7 @@ static const unsigned char xqc_h3_msgerr_valid_headers[] = {
 };
 
 
-static xqc_h3_stream_t *
+xqc_h3_stream_t *
 xqc_h3_msgerr_setup(xqc_connection_t **out_conn, xqc_h3_conn_t **out_h3c)
 {
     xqc_connection_t *conn = test_engine_connect();
@@ -1077,7 +1075,7 @@ xqc_h3_msgerr_setup(xqc_connection_t **out_conn, xqc_h3_conn_t **out_h3c)
     return h3s;
 }
 
-static void
+void
 xqc_h3_msgerr_teardown(xqc_h3_stream_t *h3s, xqc_h3_conn_t *h3c,
     xqc_connection_t *conn)
 {

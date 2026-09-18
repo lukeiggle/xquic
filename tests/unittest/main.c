@@ -49,6 +49,7 @@
 #include "xqc_test_path_hard_cap.h"
 #include "xqc_test_next_wakeup.h"
 #include "xqc_set_conn_settings_test.h"
+#include "xqc_h3_recv_cap_test.h"
 #include "xqc_crypto_frame_test.h"
 #include "xqc_dos_e2e_test.h"
 #include "xqc_wlb_test.h"
@@ -572,6 +573,16 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_applimit_lingering_ack_only", xqc_test_applimit_lingering_ack_only)
         || !CU_add_test(pSuite, "xqc_test_applimit_marker_value", xqc_test_applimit_marker_value)
         || !CU_add_test(pSuite, "xqc_test_applimit_pacer_untouched", xqc_test_applimit_pacer_untouched)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_body_buf_accounting", xqc_test_h3_recv_body_buf_accounting)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_body_buf_conn_sum_on_destroy", xqc_test_h3_recv_body_buf_conn_sum_on_destroy)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_pause_latches_at_high_water", xqc_test_h3_recv_pause_latches_at_high_water)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_pause_holds_within_hysteresis", xqc_test_h3_recv_pause_holds_within_hysteresis)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_pause_releases_below_low_water", xqc_test_h3_recv_pause_releases_below_low_water)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_pause_releases_when_max_cleared", xqc_test_h3_recv_pause_releases_when_max_cleared)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_pause_releases_at_max_one", xqc_test_h3_recv_pause_releases_at_max_one)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_conn_sum_spans_requests", xqc_test_h3_recv_conn_sum_spans_requests)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_destroy_while_latched", xqc_test_h3_recv_destroy_while_latched)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_unbounded_by_default", xqc_test_h3_recv_unbounded_by_default)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

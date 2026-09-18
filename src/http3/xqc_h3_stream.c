@@ -1142,6 +1142,21 @@ xqc_h3_stream_process_request(xqc_h3_stream_t *h3s, unsigned char *data, size_t 
                     return ret;
                 }
                 h3s->h3r->body_buf_count++;
+                h3s->h3r->body_buf_bytes += len;
+                h3s->h3c->h3_recv_buffered_bytes += len;
+
+                /* Latch the receive pause once the request's unconsumed body
+                 * reaches the configured high-water. Done here, at the only
+                 * site where the total grows, rather than in the read loop:
+                 * the loop then merely consults the flag, which keeps the
+                 * decision one-sided and makes the hysteresis testable
+                 * without driving a transport read. 0 = feature off. */
+                if (h3s->h3c->conn->conn_settings.h3_recv_body_buf_max
+                        && h3s->h3r->body_buf_bytes
+                               >= h3s->h3c->conn->conn_settings.h3_recv_body_buf_max)
+                {
+                    h3s->flags |= XQC_HTTP3_STREAM_FLAG_RECV_PAUSED;
+                }
 
                 processed += len;
                 pctx->frame.consumed_len += len;

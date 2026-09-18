@@ -103,6 +103,12 @@ typedef struct xqc_h3_conn_s {
 
     /* blocked buffer monitoring */
     size_t                       total_blocked_buf_size;           /* current total blocked buffer size */
+
+    /* Sum of body_buf_bytes over this connection's live requests — the
+     * connection-level view of unconsumed H3 receive buffering. Derived by
+     * mirroring every per-request delta rather than by walking the stream
+     * table, so reading it is O(1) and safe to poll from a status timer. */
+    size_t                       h3_recv_buffered_bytes;
 } xqc_h3_conn_t;
 
 

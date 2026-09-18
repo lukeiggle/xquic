@@ -128,6 +128,7 @@ if(HAVE_CUNIT)
         ${UNIT_TEST_DIR}/xqc_test_path_hard_cap.c
         ${UNIT_TEST_DIR}/xqc_test_next_wakeup.c
         ${UNIT_TEST_DIR}/xqc_set_conn_settings_test.c
+        ${UNIT_TEST_DIR}/xqc_h3_recv_cap_test.c
         ${UNIT_TEST_DIR}/xqc_crypto_frame_test.c
         ${UNIT_TEST_DIR}/xqc_dos_e2e_test.c
         ${UNIT_TEST_DIR}/xqc_wlb_test.c

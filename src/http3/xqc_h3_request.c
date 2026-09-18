@@ -57,6 +57,25 @@ xqc_get_fec_fin_delay(xqc_usec_t stream_fin_time, xqc_usec_t last_rpr_time)
 }
 
 
+/* Single point at which unconsumed body leaves the accounting: subtracts the
+ * same delta from the per-request counter and the connection sum it mirrors.
+ * The clamp to the request's own charge is what keeps the two in step if the
+ * body_buf_bytes invariant is ever broken elsewhere — an over-large delta
+ * degrades to "credit everything this request still holds" rather than
+ * wrapping either size_t and reporting a multi-exabyte gauge. Both credit
+ * sites go through here so neither can grow a second, divergent rule. */
+static void
+xqc_h3_request_body_buf_credit(xqc_h3_request_t *h3_request, size_t bytes)
+{
+    if (bytes > h3_request->body_buf_bytes) {
+        bytes = h3_request->body_buf_bytes;
+    }
+
+    h3_request->body_buf_bytes -= bytes;
+    h3_request->h3_stream->h3c->h3_recv_buffered_bytes -= bytes;
+}
+
+
 void
 xqc_h3_request_destroy(xqc_h3_request_t *h3_request)
 {
@@ -118,6 +137,12 @@ xqc_h3_request_destroy(xqc_h3_request_t *h3_request)
     for (size_t i = 0; i < XQC_H3_REQUEST_MAX_HEADERS_CNT; i++) {
         xqc_h3_headers_free(&h3_request->h3_header[i]);
     }
+
+    /* Return this request's remaining charge to the connection sum before
+     * the list is freed. Without this the gauge only ever climbs: every
+     * request torn down with body still buffered (a peer reset, a connection
+     * close) would leave its bytes counted forever. */
+    xqc_h3_request_body_buf_credit(h3_request, h3_request->body_buf_bytes);
 
     xqc_list_buf_list_free(&h3_request->body_buf);
     xqc_free(h3_request);
@@ -183,6 +208,7 @@ xqc_h3_request_create_inner(xqc_h3_conn_t *h3_conn, xqc_h3_stream_t *h3_stream,
 
     xqc_init_list_head(&h3_request->body_buf);
     h3_request->body_buf_count = 0;
+    h3_request->body_buf_bytes = 0;
 
     xqc_h3_request_init_callbacks(h3_conn, h3_request);
 
@@ -761,6 +787,7 @@ xqc_h3_request_recv_body(xqc_h3_request_t *h3_request, unsigned char *recv_buf,
     ssize_t n_recv = 0;
     xqc_list_head_t *pos, *next;
     xqc_list_buf_t *list_buf = NULL;
+    uint32_t max_recv_buf;
 
     *fin = XQC_FALSE;
 
@@ -787,6 +814,37 @@ xqc_h3_request_recv_body(xqc_h3_request_t *h3_request, unsigned char *recv_buf,
             buf->consumed_len += recv_buf_size - n_recv;
             n_recv = recv_buf_size;
             break;
+        }
+    }
+
+    /* Credit back exactly what was handed to the application. */
+    xqc_h3_request_body_buf_credit(h3_request, (size_t)n_recv);
+
+    /* Re-arm reading once the application has drained below half the
+     * high-water. Two things have to happen: clear the latch the H3 read
+     * loop consults, and put the transport stream back on the connection's
+     * read list — xqc_stream_recv() calls xqc_stream_shutdown_read() at the
+     * end of every call, and the pause path in xqc_h3_stream_process_data()
+     * does the same, so nothing else would ever schedule this stream again
+     * (the peer is blocked by the very credit we stopped issuing, so no
+     * inbound STREAM frame is coming to re-arm it either).
+     *
+     * Two escapes sit beside the low-water so the latch cannot outlive the
+     * setting that armed it. max == 0 means the feature was turned off while
+     * this stream was paused; the low-water alone would then read
+     * "body_buf_bytes < 0", never release, and leave the stream silently
+     * stalled for the life of the connection. An empty buffer releases for
+     * the same reason at max == 1, where the low-water is also 0: there is
+     * nothing left to drain, so there is nothing left to wait for. */
+    max_recv_buf = h3_request->h3_stream->h3c->conn->conn_settings.h3_recv_body_buf_max;
+    if ((h3_request->h3_stream->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED)
+        && (max_recv_buf == 0
+            || h3_request->body_buf_bytes == 0
+            || h3_request->body_buf_bytes < max_recv_buf / 2))
+    {
+        h3_request->h3_stream->flags &= ~XQC_HTTP3_STREAM_FLAG_RECV_PAUSED;
+        if (h3_request->h3_stream->stream) {
+            xqc_stream_ready_to_read(h3_request->h3_stream->stream);
         }
     }
 

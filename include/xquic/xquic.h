@@ -1825,6 +1825,37 @@ typedef struct xqc_conn_settings_s {
      * — libxquic currently carries no SOVERSION.
      */
     uint8_t                     defer_send_flush;
+
+    /**
+     * Per-request high-water, in bytes, on HTTP/3 response/request body that
+     * has been read off the transport stream but NOT yet consumed by the
+     * application through xqc_h3_request_recv_body(). Default: 0 (off) --
+     * byte-for-byte today's behaviour, where that buffer is unbounded.
+     *
+     * Why the receive window does not cover this: flow-control credit is
+     * released in xqc_stream_recv() on the TRANSPORT read
+     * (stream_data_in.next_read_offset advances, then
+     * xqc_stream_do_recv_flow_ctl() writes MAX_STREAM_DATA / MAX_DATA), and
+     * the H3 layer performs that read unconditionally. So the receive window
+     * bounds bytes in flight, not bytes parked in xqc_h3_request_t.body_buf.
+     * An application that drains slower than the peer sends therefore grows
+     * that list without limit.
+     *
+     * When non-zero and the buffered total for a request reaches it, the
+     * request's stream stops calling xqc_stream_recv(): next_read_offset
+     * stops advancing, no further credit is issued, and the peer blocks at
+     * the stream window. Reading resumes once the application has drained
+     * below half this value. Request streams only -- control, QPACK and
+     * bytestream types are unaffected.
+     *
+     * Overshoot is bounded by one transport read (XQC_DATA_BUF_SIZE_4K)
+     * beyond the high-water, because the check is applied between reads.
+     *
+     * Per-request, not per-connection: the aggregate bound is this value
+     * times the number of concurrently backpressured requests. Size it with
+     * that product in mind.
+     */
+    uint32_t                    h3_recv_body_buf_max;
 } xqc_conn_settings_t;
 
 

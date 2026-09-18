@@ -23,11 +23,19 @@ make_zero_engine(void)
     return e;
 }
 
-/* The 18 fields below are the subset of xqc_conn_settings_t that
- * mqvpn (the primary downstream consumer) populates today. Each
- * picks a non-default sentinel value so a missing copy line in
+/* The 19 fields below are the subset of xqc_conn_settings_t that
+ * mqvpn (the primary downstream consumer) sets today, plus fields
+ * added to the struct ahead of their downstream use. Each picks a
+ * non-default sentinel value so a missing copy line in
  * xqc_server_set_conn_settings would zero the field and trip an
  * assertion.
+ *
+ * Probing a field before anything sets it is the point, not an
+ * oversight: the copier is field-by-field, so the window in which a
+ * new field is silently dropped on the server opens the moment the
+ * field is added and closes only when a probe lands here. Waiting for
+ * the consumer would leave it open across exactly the commits that
+ * are easiest to review as no-ops.
  *
  * Keep that claim literally true when adding to it: the scheduler and
  * reinjection callbacks were absent for a while, which quietly made the
@@ -63,6 +71,7 @@ xqc_test_server_set_conn_settings_propagation(void)
     in.init_max_path_id = 16;            /* non-zero → wins over default */
     in.max_path_id_grant_max_value = 32; /* direct copy */
     in.defer_send_flush = 1;             /* direct copy */
+    in.h3_recv_body_buf_max = 4 * 1024 * 1024; /* direct copy */
 
     /* mqvpn_build_conn_settings() runs mqvpn_apply_scheduler() and
      * mqvpn_apply_reinjection() unconditionally, so a server's input always
@@ -102,6 +111,10 @@ xqc_test_server_set_conn_settings_propagation(void)
      * — the client path assigns the whole struct so it cannot notice, and a
      * downstream builder test only proves the input side. */
     CU_ASSERT_EQUAL(e->default_conn_settings.defer_send_flush, 1);
+    /* Same field-by-field hazard as defer_send_flush above: a missing copy
+     * line here would silently leave every server connection buffering
+     * unread H3 body without limit regardless of what the caller asked for. */
+    CU_ASSERT_EQUAL(e->default_conn_settings.h3_recv_body_buf_max, 4 * 1024 * 1024);
 
     /* Scheduler / reinjection: the copy lines these pin are the ones whose
      * silent loss costs the most (default scheduler instead of WLB). */

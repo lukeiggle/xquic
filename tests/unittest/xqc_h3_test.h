@@ -5,6 +5,17 @@
 #ifndef XQUIC_XQC_H3_TEST_H
 #define XQUIC_XQC_H3_TEST_H
 
+#include "xquic/xquic_typedef.h"
+
+/* Shared h3 request-stream fixture: a real engine-backed client connection
+ * with an h3 conn, a CLI_BID transport stream, a REQUEST h3 stream and an
+ * eagerly created request. Exposed (rather than duplicated) so
+ * xqc_h3_recv_cap_test.c builds on exactly the same construction the
+ * message-error tests use. */
+xqc_h3_stream_t *xqc_h3_msgerr_setup(xqc_connection_t **out_conn, xqc_h3_conn_t **out_h3c);
+void xqc_h3_msgerr_teardown(xqc_h3_stream_t *h3s, xqc_h3_conn_t *h3c,
+                            xqc_connection_t *conn);
+
 void xqc_test_frame();
 void xqc_test_h3_single_vint_frame_valid();
 void xqc_test_h3_single_vint_frame_length_error();

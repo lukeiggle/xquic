@@ -37,6 +37,15 @@ typedef struct xqc_h3_request_s {
     /* received body buf list and statistic information */
     xqc_list_head_t                 body_buf;
     uint64_t                        body_buf_count;
+    /* Bytes currently held in body_buf and not yet handed to the
+     * application. Invariant: equals the sum of (data_len - consumed_len)
+     * over body_buf. It grows at exactly one site, the DATA-frame append in
+     * xqc_h3_stream_process_request(), and shrinks at exactly one,
+     * xqc_h3_request_body_buf_credit(), through which both the drain in
+     * xqc_h3_request_recv_body() and xqc_h3_request_destroy() return their
+     * charge. Every one of those deltas is mirrored into
+     * xqc_h3_conn_t.h3_recv_buffered_bytes. */
+    size_t                          body_buf_bytes;
     size_t                          body_recvd;
     size_t                          body_recvd_final_size;
 
