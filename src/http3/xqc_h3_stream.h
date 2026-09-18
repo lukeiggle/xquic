@@ -228,6 +228,13 @@ xqc_int_t xqc_h3_stream_process_blocked_stream(xqc_h3_stream_t *h3s);
 xqc_int_t xqc_h3_stream_process_in(xqc_h3_stream_t *h3s, unsigned char *data,
                                    size_t data_len, xqc_bool_t fin_flag);
 
+/* The transport read loop: pulls bytes off the transport stream and feeds
+   them to xqc_h3_stream_process_in(). Declared here for the same reason as
+   above — the receive-pause tests drive it directly, because the flow-control
+   credit it does or does not release is only observable at this level. */
+xqc_int_t xqc_h3_stream_process_data(xqc_stream_t *stream, xqc_h3_stream_t *h3s,
+                                     xqc_bool_t *fin);
+
 xqc_var_buf_t *xqc_h3_stream_get_send_buf(xqc_h3_stream_t *h3s);
 
 uint64_t xqc_h3_stream_get_err(xqc_h3_stream_t *h3s);

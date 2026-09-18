@@ -1851,9 +1851,51 @@ typedef struct xqc_conn_settings_s {
      * Overshoot is bounded by one transport read (XQC_DATA_BUF_SIZE_4K)
      * beyond the high-water, because the check is applied between reads.
      *
-     * Per-request, not per-connection: the aggregate bound is this value
-     * times the number of concurrently backpressured requests. Size it with
-     * that product in mind.
+     * APPLICATION CONTRACT. Reading resumes only when body_buf_bytes falls
+     * below half this value, or to zero. A partial drain that stops at or
+     * above that low-water leaves the request paused, and no further
+     * read_notify arrives to prompt another attempt: the stream has been
+     * taken off the connection read list and the peer is blocked by the very
+     * credit the pause withheld, so nothing will re-arm it. The drain call
+     * itself is the only re-arm. An application must therefore either read
+     * to -XQC_EAGAIN inside its recv-body callback, or own its re-arm and
+     * call xqc_h3_request_recv_body() again from whatever event frees its
+     * downstream capacity -- for a proxy writing into a TCP stack, that is
+     * the stack's send-completion callback, not the next H3 read notify,
+     * because there will not be one. Without this setting the distinction did
+     * not matter, since more inbound data would re-notify; with it, declining
+     * to read is a stall.
+     *
+     * CONNECTION-LEVEL FLOW CONTROL. A paused request stops advancing
+     * conn_flow_ctl.fc_data_read as well as its own stream offset, so the
+     * transport data it leaves unread -- bounded by that stream's receive
+     * window, since next_read_offset is frozen and the peer cannot send past
+     * it -- is held against the SHARED connection window for as long as the
+     * pause lasts. N concurrently paused requests can therefore exhaust the
+     * connection receive window (the max_data this endpoint advertises) and
+     * head-of-line-stall streams that are not paused at all. Size so that
+     *
+     *     connection receive window > (expected concurrent paused streams)
+     *                                 * (per-stream receive window)
+     *
+     * or pair this per-request cap with a per-connection aggregate bound.
+     * With recv_rate_bytes_per_sec set, the advertised max_data is clamped to
+     * at most XQC_MAX_RECV_WINDOW, the same as a single stream's window, so
+     * one paused request can hold the whole connection credit; avoid
+     * combining the two settings.
+     *
+     * QPACK-BLOCKED STREAMS BYPASS THE PAUSE. A stream blocked on QPACK
+     * decoding is routed by xqc_h3_stream_read_notify() to
+     * xqc_h3_stream_process_blocked_data(), which is not gated by this
+     * setting and keeps reading into the blocked-buffer list. That path has
+     * its own bound, max_blocked_buf_per_stream.
+     *
+     * Per-request, not per-connection. The worst case a single request can
+     * hold in HEAP is therefore this value, plus one XQC_DATA_BUF_SIZE_4K of
+     * overshoot, plus max_blocked_buf_per_stream; and the aggregate bound is
+     * that sum times the number of concurrently backpressured requests. Size
+     * it with that product in mind, and with the connection-window product
+     * above -- they are separate limits and either can bind first.
      */
     uint32_t                    h3_recv_body_buf_max;
 } xqc_conn_settings_t;

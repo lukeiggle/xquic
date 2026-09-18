@@ -1889,6 +1889,29 @@ xqc_h3_stream_process_blocked_data(xqc_stream_t *stream, xqc_h3_stream_t *h3s,
 }
 
 
+/* Whether the H3 read loop must leave this stream's transport data unread.
+ *
+ * Only request streams carry a body budget; control and QPACK streams are
+ * never latched, and a request stream whose xqc_h3_request_t has already gone
+ * has nothing left to drain.
+ *
+ * The terminal recv states are an explicit escape, not an oversight. A peer
+ * RESET_STREAM re-arms the read side (xqc_process_reset_stream_frame) so the
+ * H3 layer is told; recognising it happens inside xqc_stream_recv(), which
+ * also shuts the read side and calls xqc_stream_maybe_need_close(). Honouring
+ * the pause there would swallow the reset and strand the stream, because the
+ * peer is gone and the drain that releases the latch is never coming.
+ */
+static xqc_bool_t
+xqc_h3_stream_recv_paused(xqc_h3_stream_t *h3s)
+{
+    return h3s->type == XQC_H3_STREAM_TYPE_REQUEST
+           && h3s->h3r != NULL
+           && (h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED)
+           && h3s->stream->stream_state_recv < XQC_RECV_STREAM_ST_RESET_RECVD;
+}
+
+
 xqc_int_t
 xqc_h3_stream_process_data(xqc_stream_t *stream, xqc_h3_stream_t *h3s, xqc_bool_t *fin)
 {
@@ -1898,6 +1921,24 @@ xqc_h3_stream_process_data(xqc_stream_t *stream, xqc_h3_stream_t *h3s, xqc_bool_
     unsigned char buff[XQC_DATA_BUF_SIZE_4K];
     size_t buff_size = XQC_DATA_BUF_SIZE_4K;
     uint64_t insert_cnt = xqc_qpack_get_dec_insert_count(h3s->qpack);
+
+    /* Receive pause (conn_settings.h3_recv_body_buf_max): the application has
+     * not drained this request's body, so do not read further transport data.
+     * Leaving the frames in stream_data_in is the whole mechanism --
+     * next_read_offset does not advance, so xqc_stream_do_recv_flow_ctl() is
+     * never reached and no MAX_STREAM_DATA is written; the peer blocks at the
+     * stream window instead of filling our heap.
+     *
+     * shutdown_read rather than a bare return: an inbound STREAM frame calls
+     * xqc_stream_ready_to_read() (xqc_frame.c), which both sets the flag and
+     * pushes the connection onto the active queue, so a stream left on
+     * conn_read_streams would be re-notified on every engine pass for as long
+     * as the pause lasts. xqc_h3_request_recv_body() puts it back when the
+     * application drains below the low-water. */
+    if (xqc_h3_stream_recv_paused(h3s)) {
+        xqc_stream_shutdown_read(stream);
+        return XQC_OK;
+    }
 
     do {
         /* recv data from transport stream */
@@ -1934,6 +1975,14 @@ xqc_h3_stream_process_data(xqc_stream_t *stream, xqc_h3_stream_t *h3s, xqc_bool_
          * list */
         if (h3s->flags & XQC_HTTP3_STREAM_FLAG_QPACK_DECODE_BLOCKED) {
             return xqc_h3_stream_process_blocked_data(stream, h3s, fin);
+        }
+
+        /* The process_in above may have just crossed the high-water. Stop
+         * before the next read so overshoot is bounded by one 4 KiB transport
+         * read rather than by the whole loop. */
+        if (xqc_h3_stream_recv_paused(h3s)) {
+            xqc_stream_shutdown_read(stream);
+            break;
         }
 
     } while (read == buff_size && !*fin);

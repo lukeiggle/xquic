@@ -9,7 +9,10 @@
 #include "src/http3/xqc_h3_stream.h"
 #include "src/http3/xqc_h3_request.h"
 #include "src/transport/xqc_stream.h"
+#include "src/transport/xqc_frame.h"
+#include "src/http3/xqc_h3_defs.h"
 #include "xqc_h3_test.h"
+#include "xqc_test_helpers.h"
 #include "xqc_h3_recv_cap_test.h"
 
 /* Same construction xqc_h3_test.c's xqc_h3_msgerr_setup uses (a real
@@ -345,6 +348,278 @@ xqc_test_h3_recv_unbounded_by_default(void)
     }
     CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, 2400);
     CU_ASSERT_FALSE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+
+    recv_cap_teardown(h3s, h3c, conn);
+}
+
+void
+xqc_test_h3_recv_paused_stops_transport_read(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+
+    conn->conn_settings.h3_recv_body_buf_max = 64;
+
+    /* Park a readable DATA frame in the transport stream's receive queue so
+     * an unsuppressed process_data would certainly consume it. */
+    unsigned char frame[32];
+    frame[0] = 0x00;                    /* DATA */
+    frame[1] = 20;                      /* length */
+    memset(frame + 2, 'y', 20);
+    xqc_test_push_stream_frame(h3s->stream, 0, frame, 22, 0);
+
+    uint64_t before = h3s->stream->stream_data_in.next_read_offset;
+
+    /* Not paused: the read happens. */
+    xqc_bool_t fin = XQC_FALSE;
+    CU_ASSERT_EQUAL(xqc_h3_stream_process_data(h3s->stream, h3s, &fin), XQC_OK);
+    CU_ASSERT_TRUE(h3s->stream->stream_data_in.next_read_offset > before);
+
+    /* Now pause and push more: next_read_offset must not move, and the
+     * stream must be off the read list so the engine does not spin on it. */
+    h3s->flags |= XQC_HTTP3_STREAM_FLAG_RECV_PAUSED;
+    xqc_test_push_stream_frame(h3s->stream, 22, frame, 22, 0);
+    xqc_stream_ready_to_read(h3s->stream);
+
+    before = h3s->stream->stream_data_in.next_read_offset;
+    fin = XQC_FALSE;
+    CU_ASSERT_EQUAL(xqc_h3_stream_process_data(h3s->stream, h3s, &fin), XQC_OK);
+    CU_ASSERT_EQUAL(h3s->stream->stream_data_in.next_read_offset, before);
+    CU_ASSERT_FALSE(h3s->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+
+    recv_cap_teardown(h3s, h3c, conn);
+}
+
+/* Put the stream's receive window one step past the point where
+ * xqc_stream_do_recv_flow_ctl() must issue credit (available window below
+ * half the window size), so any call to xqc_stream_recv() -- whatever it
+ * reads -- grows fc_max_stream_data_can_recv and queues a MAX_STREAM_DATA.
+ * With the trigger forced this way, the absence of credit is evidence that
+ * the read did not happen, not evidence that the window was simply roomy. */
+static void
+arm_stream_credit(xqc_stream_t *stream)
+{
+    stream->stream_flow_ctl.fc_stream_recv_window_size = 1000;
+    stream->stream_flow_ctl.fc_max_stream_data_can_recv =
+        stream->stream_data_in.next_read_offset + 400;
+    /* 0 suppresses the window-doubling branch, which would otherwise make
+     * the post-condition depend on the fixture's srtt. */
+    stream->stream_flow_ctl.fc_last_window_update_time = 0;
+}
+
+void
+xqc_test_h3_recv_paused_withholds_stream_credit(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+
+    conn->conn_settings.h3_recv_body_buf_max = 64;
+
+    unsigned char frame[64];
+    frame[0] = 0x00;                    /* DATA */
+    frame[1] = 50;                      /* length */
+    memset(frame + 2, 'z', 50);
+
+    /* Control: unpaused, the read issues credit. */
+    xqc_test_push_stream_frame(h3s->stream, 0, frame, 52, 0);
+    arm_stream_credit(h3s->stream);
+    uint64_t credit = h3s->stream->stream_flow_ctl.fc_max_stream_data_can_recv;
+    int msd = xqc_test_count_packets_with_frame(conn, XQC_FRAME_BIT_MAX_STREAM_DATA);
+
+    xqc_bool_t fin = XQC_FALSE;
+    CU_ASSERT_EQUAL(xqc_h3_stream_process_data(h3s->stream, h3s, &fin), XQC_OK);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, 50);
+    CU_ASSERT_TRUE(h3s->stream->stream_flow_ctl.fc_max_stream_data_can_recv > credit);
+    CU_ASSERT_TRUE(xqc_test_count_packets_with_frame(conn,
+            XQC_FRAME_BIT_MAX_STREAM_DATA) > msd);
+
+    /* One more frame crosses the high-water and latches inside process_in;
+     * the bytes it read are the bounded overshoot, so credit for them is
+     * expected. What must stop is everything after. */
+    xqc_test_push_stream_frame(h3s->stream, 52, frame, 52, 0);
+    fin = XQC_FALSE;
+    CU_ASSERT_EQUAL(xqc_h3_stream_process_data(h3s->stream, h3s, &fin), XQC_OK);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, 100);
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+
+    /* Paused: arm the trigger again and prove nothing moves. */
+    xqc_test_push_stream_frame(h3s->stream, 104, frame, 52, 0);
+    arm_stream_credit(h3s->stream);
+    xqc_stream_ready_to_read(h3s->stream);
+    credit = h3s->stream->stream_flow_ctl.fc_max_stream_data_can_recv;
+    msd = xqc_test_count_packets_with_frame(conn, XQC_FRAME_BIT_MAX_STREAM_DATA);
+    uint64_t read_off = h3s->stream->stream_data_in.next_read_offset;
+
+    fin = XQC_FALSE;
+    CU_ASSERT_EQUAL(xqc_h3_stream_process_data(h3s->stream, h3s, &fin), XQC_OK);
+    CU_ASSERT_EQUAL(h3s->stream->stream_data_in.next_read_offset, read_off);
+    CU_ASSERT_EQUAL(h3s->stream->stream_flow_ctl.fc_max_stream_data_can_recv, credit);
+    CU_ASSERT_EQUAL(xqc_test_count_packets_with_frame(conn,
+            XQC_FRAME_BIT_MAX_STREAM_DATA), msd);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, 100);
+    CU_ASSERT_FALSE(h3s->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+
+    /* Drain below the low-water: the latch clears, the stream goes back on
+     * the read list, and the next pass reads and issues credit again. */
+    unsigned char out[128];
+    uint8_t body_fin = 0;
+    CU_ASSERT_EQUAL(xqc_h3_request_recv_body(h3s->h3r, out, sizeof(out), &body_fin), 100);
+    CU_ASSERT_FALSE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_TRUE(h3s->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+
+    fin = XQC_FALSE;
+    CU_ASSERT_EQUAL(xqc_h3_stream_process_data(h3s->stream, h3s, &fin), XQC_OK);
+    CU_ASSERT_TRUE(h3s->stream->stream_data_in.next_read_offset > read_off);
+    CU_ASSERT_TRUE(h3s->stream->stream_flow_ctl.fc_max_stream_data_can_recv > credit);
+    CU_ASSERT_TRUE(xqc_test_count_packets_with_frame(conn,
+            XQC_FRAME_BIT_MAX_STREAM_DATA) > msd);
+
+    recv_cap_teardown(h3s, h3c, conn);
+}
+
+void
+xqc_test_h3_recv_reset_while_paused(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+
+    conn->conn_settings.h3_recv_body_buf_max = 64;
+    feed_data_frame(h3s, 50);
+    feed_data_frame(h3s, 30);   /* 80 >= 64 -> latched */
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+
+    /* The state xqc_process_reset_stream_frame() leaves behind: recv side
+     * in RESET_RECVD, buffered frames dropped, read side re-armed so the
+     * application layer is notified. */
+    xqc_stream_recv_state_update(h3s->stream, XQC_RECV_STREAM_ST_RESET_RECVD);
+    xqc_stream_ready_to_read(h3s->stream);
+
+    /* The pause must not swallow the reset. xqc_stream_recv() is the only
+     * place the terminal recv state is recognised -- it moves the stream to
+     * RESET_READ, shuts the read side and calls xqc_stream_maybe_need_close().
+     * Suppressing here would strand the stream: the peer is gone, so the
+     * drain that releases the latch is never coming. */
+    xqc_bool_t fin = XQC_FALSE;
+    CU_ASSERT_EQUAL(xqc_h3_stream_process_data(h3s->stream, h3s, &fin),
+                    -XQC_H3_STREAM_RECV_ERROR);
+    CU_ASSERT_EQUAL(h3s->stream->stream_state_recv, XQC_RECV_STREAM_ST_RESET_READ);
+    CU_ASSERT_FALSE(h3s->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+
+    /* The charge is still the reset request's until it is destroyed. */
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 80);
+
+    recv_cap_teardown(h3s, h3c, conn);
+}
+
+void
+xqc_test_h3_recv_close_while_paused(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+
+    xqc_h3_stream_t *h3s2 = recv_cap_add_request(conn, h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s2);
+
+    conn->conn_settings.h3_recv_body_buf_max = 64;
+    feed_data_frame(h3s2, 50);
+    feed_data_frame(h3s2, 30);  /* 80 >= 64 -> latched */
+    feed_data_frame(h3s, 20);
+    CU_ASSERT_TRUE(h3s2->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 100);
+
+    /* Suppression leaves undrained bytes on BOTH sides of the H3 boundary:
+     * parsed body in body_buf and unparsed STREAM frames still queued in
+     * the transport reassembly list. A connection close has to unwind both.
+     * The parked frame is what distinguishes this from the destroy-while-
+     * latched test, which only has the body side. */
+    unsigned char frame[32];
+    frame[0] = 0x00;
+    frame[1] = 20;
+    memset(frame + 2, 'q', 20);
+    xqc_test_push_stream_frame(h3s2->stream, 0, frame, 22, 0);
+    CU_ASSERT_EQUAL(h3s2->stream->stream_data_in.buffered_frame_count, 1);
+
+    /* Same teardown a connection close drives per stream. A leaked charge
+     * shows up in the sum; a leaked or doubly freed frame shows up in the
+     * allocator. */
+    recv_cap_drop_request(h3s2);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 20);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, 20);
+
+    recv_cap_teardown(h3s, h3c, conn);
+}
+
+void
+xqc_test_h3_recv_pause_bounds_overshoot_to_one_read(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+
+    conn->conn_settings.h3_recv_body_buf_max = 64;
+
+    /* One DATA frame far larger than the 4 KiB read buffer, delivered as a
+     * single contiguous run of transport bytes -- the shape a fast peer
+     * produces. process_data's loop re-reads while each read fills the
+     * buffer, so without an in-loop check the latch set on the first 4 KiB
+     * would be ignored for the remaining five. */
+    size_t body = 5 * XQC_DATA_BUF_SIZE_4K;
+    size_t hdr = 5;                     /* type + 4-byte length varint */
+    unsigned char *frame = xqc_malloc(hdr + body);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(frame);
+    frame[0] = 0x00;                                    /* DATA */
+    frame[1] = (unsigned char)(0x80 | ((body >> 24) & 0x3f));
+    frame[2] = (unsigned char)((body >> 16) & 0xff);
+    frame[3] = (unsigned char)((body >> 8) & 0xff);
+    frame[4] = (unsigned char)(body & 0xff);
+    memset(frame + hdr, 'w', body);
+    xqc_test_push_stream_frame(h3s->stream, 0, frame, hdr + body, 0);
+    xqc_free(frame);
+
+    xqc_bool_t fin = XQC_FALSE;
+    CU_ASSERT_EQUAL(xqc_h3_stream_process_data(h3s->stream, h3s, &fin), XQC_OK);
+
+    /* Exactly one transport read happened. */
+    CU_ASSERT_EQUAL(h3s->stream->stream_data_in.next_read_offset,
+                    XQC_DATA_BUF_SIZE_4K);
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, XQC_DATA_BUF_SIZE_4K - hdr);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, XQC_DATA_BUF_SIZE_4K - hdr);
+    CU_ASSERT_FALSE(h3s->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+
+    /* The rest is still sitting in the transport queue, unread and
+     * uncredited -- which is the point. */
+    CU_ASSERT_EQUAL(h3s->stream->stream_data_in.merged_offset_end, hdr + body);
+
+    recv_cap_teardown(h3s, h3c, conn);
+}
+
+void
+xqc_test_h3_conn_get_recv_buffered_bytes(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+
+    CU_ASSERT_EQUAL(xqc_h3_conn_get_recv_buffered_bytes(NULL), 0);
+    CU_ASSERT_EQUAL(xqc_h3_conn_get_recv_buffered_bytes(h3c), 0);
+
+    feed_data_frame(h3s, 30);
+    CU_ASSERT_EQUAL(xqc_h3_conn_get_recv_buffered_bytes(h3c), 30);
+
+    /* Per-request export mirrors the same number. */
+    xqc_request_stats_t st = xqc_h3_request_get_stats(h3s->h3r);
+    CU_ASSERT_EQUAL(st.recv_body_buffered_size, 30);
 
     recv_cap_teardown(h3s, h3c, conn);
 }

@@ -259,6 +259,12 @@ xqc_h3_conn_get_errno(xqc_h3_conn_t *h3_conn)
     return ret == XQC_OK ? H3_NO_ERROR : ret;
 }
 
+uint64_t
+xqc_h3_conn_get_recv_buffered_bytes(xqc_h3_conn_t *h3c)
+{
+    return h3c ? (uint64_t)h3c->h3_recv_buffered_bytes : 0;
+}
+
 
 void *
 xqc_h3_conn_get_ssl(xqc_h3_conn_t *h3_conn)

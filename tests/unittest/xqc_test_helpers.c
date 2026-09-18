@@ -4,6 +4,7 @@
 
 #include "xqc_test_helpers.h"
 
+#include <CUnit/CUnit.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,6 +14,7 @@
 #include "src/transport/xqc_multipath.h"
 #include "src/transport/xqc_packet_out.h"
 #include "src/transport/xqc_send_queue.h"
+#include "src/transport/xqc_stream.h"
 #include "src/common/xqc_list.h"
 
 /* ------------------------------------------------------------------ */
@@ -231,4 +233,33 @@ xqc_test_count_packets_with_frame(xqc_connection_t *conn, uint64_t frame_bit)
     (void)xqc_test_scan_list_for_frame(&conn->conn_send_queue->sndq_send_packets,
                                        frame_bit, &n);
     return n;
+}
+
+/* ------------------------------------------------------------------ */
+/* Received-STREAM-frame injection. Builds the node xqc_stream_recv()
+ * expects to find on stream_data_in.frames_tailq and advances the
+ * reassembly watermarks so the bytes are immediately readable.
+ * ------------------------------------------------------------------ */
+void
+xqc_test_push_stream_frame(xqc_stream_t *stream, uint64_t offset,
+                           const unsigned char *data, size_t len, uint8_t fin)
+{
+    xqc_stream_frame_t *f = xqc_calloc(1, sizeof(xqc_stream_frame_t));
+    CU_ASSERT_PTR_NOT_NULL_FATAL(f);
+    f->data = xqc_malloc(len);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(f->data);
+    memcpy(f->data, data, len);
+    f->data_length = len;
+    f->data_offset = offset;
+    f->next_read_offset = 0;
+    f->fin = fin;
+
+    xqc_list_add_tail(&f->sf_list, &stream->stream_data_in.frames_tailq);
+    stream->stream_data_in.buffered_frame_count++;
+    stream->stream_data_in.merged_offset_end = offset + len;
+    stream->stream_max_recv_offset = offset + len;
+    if (fin) {
+        stream->stream_data_in.stream_determined = XQC_TRUE;
+        stream->stream_data_in.stream_length = offset + len;
+    }
 }

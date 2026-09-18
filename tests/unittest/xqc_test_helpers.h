@@ -83,4 +83,18 @@ struct xqc_packet_out_s *xqc_test_find_packet_with_frame(xqc_connection_t *conn,
                                                          uint64_t frame_bit);
 int xqc_test_count_packets_with_frame(xqc_connection_t *conn, uint64_t frame_bit);
 
+/* Inject a received STREAM frame directly into a stream's reassembly queue,
+ * bypassing packet parsing. Frames must be pushed in offset order and must
+ * be contiguous — this helper does not reassemble gaps, because the tests
+ * that use it are about what the reader does with data that IS available,
+ * not about reordering.
+ *
+ * buffered_data_bytes is deliberately left alone: that counter is owned by
+ * the out-of-order buffering path in xqc_frame.c, which this helper is
+ * standing in for rather than driving, and xqc_stream_recv() does not
+ * consult it.
+ */
+void xqc_test_push_stream_frame(xqc_stream_t *stream, uint64_t offset,
+                                const unsigned char *data, size_t len, uint8_t fin);
+
 #endif /* XQC_TEST_HELPERS_H */

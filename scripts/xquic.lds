@@ -10,6 +10,7 @@ XQUIC_VERS_1.0 {
         xqc_h3_conn_close;
         xqc_scid_str;
         xqc_h3_conn_get_errno;
+        xqc_h3_conn_get_recv_buffered_bytes;
         xqc_h3_conn_get_ssl;
         xqc_h3_conn_set_user_data;
         xqc_h3_conn_get_user_data;

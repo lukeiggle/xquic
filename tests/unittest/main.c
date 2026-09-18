@@ -583,6 +583,12 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_h3_recv_conn_sum_spans_requests", xqc_test_h3_recv_conn_sum_spans_requests)
         || !CU_add_test(pSuite, "xqc_test_h3_recv_destroy_while_latched", xqc_test_h3_recv_destroy_while_latched)
         || !CU_add_test(pSuite, "xqc_test_h3_recv_unbounded_by_default", xqc_test_h3_recv_unbounded_by_default)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_paused_stops_transport_read", xqc_test_h3_recv_paused_stops_transport_read)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_paused_withholds_stream_credit", xqc_test_h3_recv_paused_withholds_stream_credit)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_reset_while_paused", xqc_test_h3_recv_reset_while_paused)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_close_while_paused", xqc_test_h3_recv_close_while_paused)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_pause_bounds_overshoot_to_one_read", xqc_test_h3_recv_pause_bounds_overshoot_to_one_read)
+        || !CU_add_test(pSuite, "xqc_test_h3_conn_get_recv_buffered_bytes", xqc_test_h3_conn_get_recv_buffered_bytes)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

@@ -428,6 +428,7 @@ xqc_h3_request_get_stats(xqc_h3_request_t *h3_request)
 
     uint64_t conn_err = h3_request->h3_stream->h3c->conn->conn_err;
     stats.recv_body_size = h3_request->body_recvd;
+    stats.recv_body_buffered_size = h3_request->body_buf_bytes;
     stats.send_body_size = h3_request->body_sent;
     stats.recv_header_size = h3_request->header_recvd;
     stats.send_header_size = h3_request->header_sent;

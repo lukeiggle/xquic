@@ -241,6 +241,23 @@ typedef struct xqc_request_stats_s {
     xqc_usec_t  recv_time_with_fec;
     xqc_usec_t  final_packet_time;
     xqc_usec_t  stream_close_delay;
+
+    /**
+     * @brief bytes received off the transport stream for this request's body
+     * and NOT yet consumed by the application through
+     * xqc_h3_request_recv_body(). A gauge, not a counter: it rises when the
+     * peer outruns the reader and falls as the reader catches up. Bounded by
+     * conn_settings.h3_recv_body_buf_max when that is set, unbounded when it
+     * is 0. Distinct from recv_body_size, which is the cumulative total the
+     * application has already taken.
+     *
+     * Appended at the end, as every previous addition to this struct has
+     * been: existing members keep their offsets, so source using positional
+     * or designated initialisers is unaffected. It is not an ABI-compatible
+     * addition -- xqc_h3_request_get_stats() returns the struct by value, so
+     * the caller supplies the return buffer and must be recompiled.
+     */
+    size_t      recv_body_buffered_size;
 } xqc_request_stats_t;
 
 /**
@@ -606,6 +623,25 @@ xqc_connection_t *xqc_h3_conn_get_xqc_conn(xqc_h3_conn_t *h3c);
  */
 XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_h3_conn_get_errno(xqc_h3_conn_t *h3c);
+
+
+/**
+ * @brief unconsumed HTTP/3 receive body buffered across all of this
+ * connection's live requests, in bytes.
+ *
+ * The connection-level view of xqc_request_stats_t.recv_body_buffered_size.
+ * Maintained incrementally, so this is O(1) and safe to poll from a status
+ * timer. Returns 0 for a NULL handle.
+ *
+ * Deliberately an accessor rather than a field on xqc_conn_stats_t: the sum
+ * is owned by the HTTP/3 layer, and xqc_conn_get_stats() runs in the
+ * transport layer, which has no view of h3 request state.
+ *
+ * @param h3c handler of http3 connection
+ * @return bytes buffered, 0 if h3c is NULL
+ */
+XQC_EXPORT_PUBLIC_API
+uint64_t xqc_h3_conn_get_recv_buffered_bytes(xqc_h3_conn_t *h3c);
 
 
 /**
