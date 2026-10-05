@@ -154,6 +154,13 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_stream_reset_idempotent", xqc_test_stream_reset_idempotent)
         || !CU_add_test(pSuite, "xqc_test_stream_stop_sending_recv_only", xqc_test_stream_stop_sending_recv_only)
         || !CU_add_test(pSuite, "xqc_test_stream_stop_sending_after_fin", xqc_test_stream_stop_sending_after_fin)
+        || !CU_add_test(pSuite, "xqc_test_peer_abort_notify_reset", xqc_test_peer_abort_notify_reset)
+        || !CU_add_test(pSuite, "xqc_test_peer_abort_notify_stop_sending", xqc_test_peer_abort_notify_stop_sending)
+        || !CU_add_test(pSuite, "xqc_test_no_reset_echo", xqc_test_no_reset_echo)
+        || !CU_add_test(pSuite, "xqc_test_peer_abort_notify_full_code", xqc_test_peer_abort_notify_full_code)
+        || !CU_add_test(pSuite, "xqc_test_peer_abort_notify_passive", xqc_test_peer_abort_notify_passive)
+        || !CU_add_test(pSuite, "xqc_test_peer_abort_after_data_read", xqc_test_peer_abort_after_data_read)
+        || !CU_add_test(pSuite, "xqc_test_peer_abort_notify_absent", xqc_test_peer_abort_notify_absent)
 #ifdef XQC_ENABLE_TEST_HOOKS
         || !CU_add_test(pSuite, "xqc_test_stream_create_with_id", xqc_test_stream_create_with_id)
 #endif

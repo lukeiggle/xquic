@@ -354,6 +354,9 @@ struct xqc_connection_s {
      * was created for; bounded by conn_settings.max_implicit_streams */
     uint64_t implicit_stream_count;
 
+    /* do not echo a received RESET_STREAM (xqc_conn_set_no_reset_echo) */
+    unsigned no_reset_echo : 1;
+
     xqc_trans_settings_t local_settings;
     xqc_trans_settings_t remote_settings;
 

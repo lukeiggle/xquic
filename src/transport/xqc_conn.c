@@ -3453,6 +3453,12 @@ xqc_conn_close_with_error(xqc_connection_t *conn, uint64_t err_code)
     return XQC_OK;
 }
 
+void
+xqc_conn_set_no_reset_echo(xqc_connection_t *conn, int on)
+{
+    conn->no_reset_echo = on ? 1 : 0;
+}
+
 xqc_int_t
 xqc_conn_get_errno(xqc_connection_t *conn)
 {

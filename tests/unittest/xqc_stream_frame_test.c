@@ -982,6 +982,227 @@ xqc_test_stream_stop_sending_after_fin(void)
     xqc_engine_destroy(conn->engine);
 }
 
+static struct {
+    int aborts;
+    xqc_stream_peer_abort_t kind;
+    uint64_t code;
+    void *user_data;
+    int creates;
+} g_abort;
+
+static void
+test_abort_cb(xqc_stream_t *stream, xqc_stream_peer_abort_t kind,
+              uint64_t err_code, void *strm_user_data)
+{
+    g_abort.aborts++;
+    g_abort.kind = kind;
+    g_abort.code = err_code;
+    g_abort.user_data = strm_user_data;
+}
+
+static int
+test_abort_create_cb(xqc_stream_t *stream, void *strm_user_data)
+{
+    g_abort.creates++;
+    return XQC_OK;
+}
+
+static xqc_connection_t *
+test_abort_conn(int with_cb)
+{
+    memset(&g_abort, 0, sizeof(g_abort));
+    xqc_connection_t *conn = test_engine_connect();
+    if (conn) {
+        xqc_stream_callbacks_t *cbs = &conn->app_proto_cbs.stream_cbs;
+        cbs->stream_peer_abort_notify = with_cb ? test_abort_cb : NULL;
+        cbs->stream_create_notify = test_abort_create_cb;
+    }
+    return conn;
+}
+
+/* type 0x04 (RESET_STREAM) or 0x05 (STOP_SENDING) for stream id sid < 64,
+ * with an 8-byte code varint */
+static xqc_int_t
+test_peer_abort_frame(xqc_connection_t *conn, int reset, uint8_t sid,
+                      uint64_t code)
+{
+    unsigned char f[1 + 1 + 8 + 1];
+    size_t n = 0;
+
+    f[n++] = reset ? 0x04 : 0x05;
+    f[n++] = sid;
+    f[n++] = 0xc0 | (uint8_t)(code >> 56);
+    for (int i = 6; i >= 0; i--) {
+        f[n++] = (uint8_t)(code >> (8 * i));
+    }
+    if (reset) {
+        f[n++] = 0x00; /* final size */
+    }
+
+    xqc_packet_in_t pi;
+    memset(&pi, 0, sizeof(pi));
+    pi.pi_pkt.pkt_type = XQC_PTYPE_SHORT_HEADER;
+    pi.pos = f;
+    pi.last = f + n;
+    return reset ? xqc_process_reset_stream_frame(conn, &pi)
+                 : xqc_process_stop_sending_frame(conn, &pi);
+}
+
+void
+xqc_test_peer_abort_notify_reset(void)
+{
+    xqc_connection_t *conn = test_abort_conn(1);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(conn);
+    int ud = 0;
+    xqc_stream_t *s = xqc_stream_create_with_direction(conn, XQC_STREAM_BIDI,
+                                                       &ud);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(s);
+
+    CU_ASSERT_EQUAL(test_peer_abort_frame(conn, 1, 0, 0x10c), XQC_OK);
+    CU_ASSERT_EQUAL(g_abort.aborts, 1);
+    CU_ASSERT_EQUAL(g_abort.kind, XQC_STREAM_PEER_RESET_STREAM);
+    CU_ASSERT_EQUAL(g_abort.code, 0x10c);
+    CU_ASSERT_PTR_EQUAL(g_abort.user_data, &ud);
+    /* the setter is off: the echo is still written */
+    CU_ASSERT_EQUAL(TEST_RESETS(conn), 1);
+    CU_ASSERT_EQUAL(s->stream_state_send, XQC_SEND_STREAM_ST_RESET_SENT);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+void
+xqc_test_peer_abort_notify_stop_sending(void)
+{
+    for (int opt = 0; opt < 2; opt++) {
+        xqc_connection_t *conn = test_abort_conn(1);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(conn);
+        xqc_conn_set_no_reset_echo(conn, opt);
+        xqc_stream_t *s = xqc_stream_create_with_direction(conn,
+                                                           XQC_STREAM_BIDI,
+                                                           NULL);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(s);
+
+        CU_ASSERT_EQUAL(test_peer_abort_frame(conn, 0, 0, 0x10b), XQC_OK);
+        CU_ASSERT_EQUAL(g_abort.aborts, 1);
+        CU_ASSERT_EQUAL(g_abort.kind, XQC_STREAM_PEER_STOP_SENDING);
+        CU_ASSERT_EQUAL(g_abort.code, 0x10b);
+        /* RFC 9000 3.5: the reply is written with and without the setter */
+        CU_ASSERT_EQUAL(TEST_RESETS(conn), 1);
+        CU_ASSERT_EQUAL(s->stream_state_send, XQC_SEND_STREAM_ST_RESET_SENT);
+        CU_ASSERT_EQUAL(s->stream_err, H3_REQUEST_CANCELLED);
+
+        xqc_engine_destroy(conn->engine);
+    }
+}
+
+void
+xqc_test_no_reset_echo(void)
+{
+    xqc_connection_t *conn = test_abort_conn(1);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(conn);
+    xqc_conn_set_no_reset_echo(conn, 1);
+    xqc_stream_t *s = xqc_stream_create_with_direction(conn, XQC_STREAM_BIDI,
+                                                       NULL);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(s);
+
+    CU_ASSERT_EQUAL(test_peer_abort_frame(conn, 1, 0, 0x10c), XQC_OK);
+    CU_ASSERT_EQUAL(g_abort.aborts, 1);
+    CU_ASSERT_EQUAL(TEST_RESETS(conn), 0);
+    CU_ASSERT_EQUAL(s->stream_state_send, XQC_SEND_STREAM_ST_READY);
+    CU_ASSERT_EQUAL(s->stream_state_recv, XQC_RECV_STREAM_ST_RESET_RECVD);
+
+    /* off again: back to today's behaviour */
+    xqc_conn_set_no_reset_echo(conn, 0);
+    xqc_stream_t *t = xqc_stream_create_with_direction(conn, XQC_STREAM_BIDI,
+                                                       NULL);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(t);
+    CU_ASSERT_EQUAL(test_peer_abort_frame(conn, 1, 4, 0x10c), XQC_OK);
+    CU_ASSERT_EQUAL(TEST_RESETS(conn), 1);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+void
+xqc_test_peer_abort_notify_full_code(void)
+{
+    const uint64_t max = (1ULL << 62) - 1;
+
+    for (int reset = 0; reset < 2; reset++) {
+        xqc_connection_t *conn = test_abort_conn(1);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(conn);
+        xqc_stream_t *s = xqc_stream_create_with_direction(conn,
+                                                           XQC_STREAM_BIDI,
+                                                           NULL);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(s);
+
+        CU_ASSERT_EQUAL(test_peer_abort_frame(conn, reset, 0, max), XQC_OK);
+        CU_ASSERT_EQUAL(g_abort.aborts, 1);
+        CU_ASSERT_EQUAL(g_abort.code, max);
+
+        xqc_engine_destroy(conn->engine);
+    }
+}
+
+void
+xqc_test_peer_abort_notify_passive(void)
+{
+    for (int opt = 0; opt < 2; opt++) {
+        xqc_connection_t *conn = test_abort_conn(1);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(conn);
+        xqc_conn_set_no_reset_echo(conn, opt);
+
+        /* server-initiated bidi stream 1, never seen */
+        CU_ASSERT_EQUAL(test_peer_abort_frame(conn, 1, 1, 0x10c), XQC_OK);
+        xqc_stream_t *s = xqc_find_stream_by_id(1, conn->streams_hash);
+        CU_ASSERT_PTR_NOT_NULL_FATAL(s);
+        CU_ASSERT_EQUAL(g_abort.creates, 1);
+        CU_ASSERT_EQUAL(g_abort.aborts, 1);
+        CU_ASSERT_EQUAL(g_abort.code, 0x10c);
+        CU_ASSERT_EQUAL(TEST_RESETS(conn), opt ? 0 : 1);
+
+        xqc_engine_destroy(conn->engine);
+    }
+}
+
+void
+xqc_test_peer_abort_after_data_read(void)
+{
+    xqc_connection_t *conn = test_abort_conn(1);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(conn);
+    xqc_conn_set_no_reset_echo(conn, 1);
+    xqc_stream_t *s = xqc_stream_create_with_direction(conn, XQC_STREAM_BIDI,
+                                                       NULL);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(s);
+    s->stream_state_recv = XQC_RECV_STREAM_ST_DATA_READ;
+
+    CU_ASSERT_EQUAL(test_peer_abort_frame(conn, 1, 0, 0x10c), XQC_OK);
+    CU_ASSERT(g_abort.aborts <= 1);
+    CU_ASSERT_EQUAL(TEST_RESETS(conn), 0);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+void
+xqc_test_peer_abort_notify_absent(void)
+{
+    xqc_connection_t *conn = test_abort_conn(0);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(conn);
+    xqc_stream_t *s = xqc_stream_create_with_direction(conn, XQC_STREAM_BIDI,
+                                                       NULL);
+    xqc_stream_t *t = xqc_stream_create_with_direction(conn, XQC_STREAM_BIDI,
+                                                       NULL);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(s);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(t);
+
+    CU_ASSERT_EQUAL(test_peer_abort_frame(conn, 1, 0, 0x10c), XQC_OK);
+    CU_ASSERT_EQUAL(test_peer_abort_frame(conn, 0, 4, 0x10b), XQC_OK);
+    CU_ASSERT_EQUAL(g_abort.aborts, 0);
+    CU_ASSERT_EQUAL(TEST_RESETS(conn), 2);
+    CU_ASSERT_EQUAL(s->stream_state_recv, XQC_RECV_STREAM_ST_RESET_RECVD);
+
+    xqc_engine_destroy(conn->engine);
+}
+
 #ifdef XQC_ENABLE_TEST_HOOKS
 /* the test hooks: a client-bidi stream with a caller-chosen id, and the
  * live implicit-entry count */

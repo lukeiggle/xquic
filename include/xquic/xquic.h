@@ -556,6 +556,17 @@ typedef void (*xqc_stream_closing_notify_pt)(xqc_stream_t *stream, xqc_int_t err
                                              void *strm_user_data);
 
 /**
+ * @brief which peer frame an xqc_stream_peer_abort_notify_pt reports
+ */
+typedef enum {
+    XQC_STREAM_PEER_RESET_STREAM = 0,
+    XQC_STREAM_PEER_STOP_SENDING = 1,
+} xqc_stream_peer_abort_t;
+
+typedef void (*xqc_stream_peer_abort_notify_pt)(xqc_stream_t *stream,
+    xqc_stream_peer_abort_t kind, uint64_t err_code, void *strm_user_data);
+
+/**
  * @brief the callback API to notify application that there is a datagram to be read
  *
  * @param conn the connection handle
@@ -845,6 +856,15 @@ typedef struct xqc_stream_callbacks_s {
      * this function will be triggered when a RESET_STREAM frame is received.
      */
     xqc_stream_closing_notify_pt stream_closing_notify;
+
+    /**
+     * @brief peer abort callback function. OPTIONAL for both server and client
+     *
+     * this function will be triggered when a RESET_STREAM or STOP_SENDING frame is
+     * received, with the full 62-bit error code. It is also triggered for a stream
+     * the frame creates passively. It must stay the last member.
+     */
+    xqc_stream_peer_abort_notify_pt stream_peer_abort_notify;
 
 } xqc_stream_callbacks_t;
 
@@ -2144,6 +2164,13 @@ xqc_int_t xqc_conn_close(xqc_engine_t *engine, const xqc_cid_t *cid);
  */
 XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_conn_close_with_error(xqc_connection_t *conn, uint64_t err_code);
+
+/**
+ * @brief stop echoing a received RESET_STREAM on the send side of the stream. Default
+ * off. The reply to STOP_SENDING is not affected (RFC 9000 Section 3.5).
+ */
+XQC_EXPORT_PUBLIC_API
+void xqc_conn_set_no_reset_echo(xqc_connection_t *conn, int on);
 
 /**
  * Get errno when conn_close_notify, 0 For no-error

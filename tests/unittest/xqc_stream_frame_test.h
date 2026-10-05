@@ -24,6 +24,13 @@ void  xqc_test_stream_reset_send_only(void);
 void  xqc_test_stream_reset_idempotent(void);
 void  xqc_test_stream_stop_sending_recv_only(void);
 void  xqc_test_stream_stop_sending_after_fin(void);
+void  xqc_test_peer_abort_notify_reset(void);
+void  xqc_test_peer_abort_notify_stop_sending(void);
+void  xqc_test_no_reset_echo(void);
+void  xqc_test_peer_abort_notify_full_code(void);
+void  xqc_test_peer_abort_notify_passive(void);
+void  xqc_test_peer_abort_after_data_read(void);
+void  xqc_test_peer_abort_notify_absent(void);
 #ifdef XQC_ENABLE_TEST_HOOKS
 void  xqc_test_stream_create_with_id(void);
 #endif
