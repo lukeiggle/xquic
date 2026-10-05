@@ -13,6 +13,10 @@
 #include "src/transport/xqc_send_queue.h"
 #include "src/transport/xqc_packet_out.h"
 #include "src/common/xqc_id_hash.h"
+#include "src/transport/xqc_multipath.h"
+#include "src/http3/xqc_h3_conn.h"
+#include "src/http3/xqc_h3_stream.h"
+#include "src/http3/xqc_h3_request.h"
 #include <xquic/xqc_errno.h>
 #include "xqc_common_test.h"
 
@@ -1199,6 +1203,163 @@ xqc_test_peer_abort_notify_absent(void)
     CU_ASSERT_EQUAL(g_abort.aborts, 0);
     CU_ASSERT_EQUAL(TEST_RESETS(conn), 2);
     CU_ASSERT_EQUAL(s->stream_state_recv, XQC_RECV_STREAM_ST_RESET_RECVD);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+void
+xqc_test_mp_state_classify(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_PTR_NOT_NULL_FATAL(conn);
+
+    /* multipath off: always 0 */
+    conn->enable_multipath = 0;
+    conn->active_path_count = 2;
+    CU_ASSERT_EQUAL(xqc_mp_state_classify(conn, 1, 1), 0);
+
+    /* multipath on, a single active path: 0 */
+    conn->enable_multipath = 1;
+    conn->active_path_count = 1;
+    CU_ASSERT_EQUAL(xqc_mp_state_classify(conn, 1, 1), 0);
+
+    conn->active_path_count = 2;
+    CU_ASSERT_EQUAL(xqc_mp_state_classify(conn, 1, 1), 1);
+    CU_ASSERT_EQUAL(xqc_mp_state_classify(conn, 0, 1), 2);
+    CU_ASSERT_EQUAL(xqc_mp_state_classify(conn, 1, 0), 3);
+    CU_ASSERT_EQUAL(xqc_mp_state_classify(conn, 0, 0), 0);
+
+    xqc_engine_destroy(conn->engine);
+}
+
+/* an H3 request stream over a transport stream, as xqc_h3_test.c builds it */
+static xqc_h3_stream_t *
+test_close_stats_h3(xqc_connection_t **out_conn, xqc_h3_conn_t **out_h3c)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    if (conn == NULL) {
+        return NULL;
+    }
+
+    if (conn->alpn) {
+        xqc_free(conn->alpn);
+    }
+    conn->alpn_len = strlen(XQC_ALPN_H3);
+    conn->alpn = xqc_calloc(1, conn->alpn_len + 1);
+    xqc_memcpy(conn->alpn, XQC_ALPN_H3, conn->alpn_len);
+    conn->conn_flow_ctl.fc_max_streams_bidi_can_send = 1024;
+    conn->conn_state = XQC_CONN_STATE_ESTABED;
+
+    xqc_h3_conn_t *h3c = xqc_h3_conn_create(conn, NULL);
+    xqc_stream_t *stream = xqc_create_stream_with_conn(conn,
+        XQC_UNDEFINE_STREAM_ID, XQC_CLI_BID, NULL, NULL);
+    if (h3c == NULL || stream == NULL) {
+        return NULL;
+    }
+
+    xqc_h3_stream_t *h3s = xqc_h3_stream_create(h3c, stream,
+        XQC_H3_STREAM_TYPE_REQUEST, NULL);
+    if (h3s == NULL) {
+        return NULL;
+    }
+    h3s->h3r = xqc_h3_request_create_inner(h3c, h3s, NULL);
+    if (h3s->h3r == NULL) {
+        return NULL;
+    }
+
+    *out_conn = conn;
+    *out_h3c = h3c;
+    return h3s;
+}
+
+static void
+test_close_stats_h3_free(xqc_h3_stream_t *h3s, xqc_h3_conn_t *h3c,
+    xqc_connection_t *conn)
+{
+    xqc_stream_t *stream = h3s->stream;
+
+    /* mark DISCARDED so the destroy does not redrive close_notify */
+    stream->stream_flag |= XQC_STREAM_FLAG_DISCARDED;
+    xqc_h3_stream_destroy(h3s);
+    xqc_destroy_stream(stream);
+    xqc_h3_conn_destroy(h3c);
+    if (conn->alpn) {
+        xqc_free(conn->alpn);
+    }
+}
+
+void
+xqc_test_stream_close_stats_parity(void)
+{
+    /* The six close paths of adoption spec section 7 item 6. xquic leaves
+     * conn_err at 0 on an idle timeout (xqc_timer_conn_idle_timeout only
+     * sets XQC_CONN_FLAG_TIME_OUT and the "idle timeout" close message), so
+     * the idle-timeout combination carries conn_err 0 and stream_err 0. */
+    static const struct {
+        const char *msg;
+        uint64_t    stream_err;
+        uint64_t    conn_err;
+    } cases[] = {
+        { "finished",    0,     0     },
+        { "remote reset", 0x10c, 0   },
+        { "local reset", 0x10c, 0     },
+        { "local reset", 0x10b, 0     },
+        { "conn closed", 0,     0x101 },
+        { "conn closed", 0,     0     },
+    };
+
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = test_close_stats_h3(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+    xqc_stream_t *s = h3s->stream;
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        s->stream_stats.local_fin_snd_time = 1000 + i;
+        s->stream_stats.first_fin_ack_time = 2000 + i;
+        s->stream_err = cases[i].stream_err;
+        s->stream_close_msg = cases[i].msg;
+        conn->conn_err = cases[i].conn_err;
+
+        xqc_stream_close_stats_t cs;
+        memset(&cs, 0xff, sizeof(cs));
+        xqc_stream_get_close_stats(s, &cs);
+
+        xqc_request_stats_t rs = xqc_h3_request_get_stats(h3s->h3r);
+        CU_ASSERT_EQUAL(cs.fin_send_time, rs.stream_fin_send_time);
+        CU_ASSERT_EQUAL(cs.fin_ack_time, rs.stream_fin_ack_time);
+        CU_ASSERT_EQUAL(cs.err, rs.stream_err);
+        CU_ASSERT_EQUAL(cs.fin_send_time, 1000 + i);
+        CU_ASSERT_EQUAL(cs.fin_ack_time, 2000 + i);
+        CU_ASSERT_EQUAL(cs.mp_state, rs.mp_state);
+        CU_ASSERT_PTR_EQUAL(cs.close_msg, cases[i].msg);
+    }
+
+    conn->conn_err = 0;
+    test_close_stats_h3_free(h3s, h3c, conn);
+}
+
+void
+xqc_test_stream_close_stats_conn_err(void)
+{
+    xqc_connection_t *conn = test_engine_connect();
+    CU_ASSERT_PTR_NOT_NULL_FATAL(conn);
+    xqc_stream_t *s = xqc_stream_create_with_direction(conn, XQC_STREAM_BIDI,
+                                                       NULL);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(s);
+
+    s->stream_err = 0x10c;
+    conn->conn_err = 0x101;
+
+    xqc_stream_close_stats_t cs;
+    xqc_stream_get_close_stats(s, &cs);
+    CU_ASSERT_EQUAL(cs.err, 0x101);
+
+    /* without a connection error the stream's own code is reported */
+    conn->conn_err = 0;
+    xqc_stream_get_close_stats(s, &cs);
+    CU_ASSERT_EQUAL(cs.err, 0x10c);
+    CU_ASSERT_PTR_NULL(cs.close_msg);
 
     xqc_engine_destroy(conn->engine);
 }

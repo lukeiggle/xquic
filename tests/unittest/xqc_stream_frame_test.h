@@ -31,6 +31,9 @@ void  xqc_test_peer_abort_notify_full_code(void);
 void  xqc_test_peer_abort_notify_passive(void);
 void  xqc_test_peer_abort_after_data_read(void);
 void  xqc_test_peer_abort_notify_absent(void);
+void  xqc_test_mp_state_classify(void);
+void  xqc_test_stream_close_stats_parity(void);
+void  xqc_test_stream_close_stats_conn_err(void);
 #ifdef XQC_ENABLE_TEST_HOOKS
 void  xqc_test_stream_create_with_id(void);
 #endif

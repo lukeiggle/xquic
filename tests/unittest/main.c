@@ -161,6 +161,9 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_peer_abort_notify_passive", xqc_test_peer_abort_notify_passive)
         || !CU_add_test(pSuite, "xqc_test_peer_abort_after_data_read", xqc_test_peer_abort_after_data_read)
         || !CU_add_test(pSuite, "xqc_test_peer_abort_notify_absent", xqc_test_peer_abort_notify_absent)
+        || !CU_add_test(pSuite, "xqc_test_mp_state_classify", xqc_test_mp_state_classify)
+        || !CU_add_test(pSuite, "xqc_test_stream_close_stats_parity", xqc_test_stream_close_stats_parity)
+        || !CU_add_test(pSuite, "xqc_test_stream_close_stats_conn_err", xqc_test_stream_close_stats_conn_err)
 #ifdef XQC_ENABLE_TEST_HOOKS
         || !CU_add_test(pSuite, "xqc_test_stream_create_with_id", xqc_test_stream_create_with_id)
 #endif

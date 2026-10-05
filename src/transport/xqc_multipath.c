@@ -979,6 +979,29 @@ xqc_conn_path_metrics_print(xqc_connection_t *conn, xqc_conn_stats_t *stats)
 
 
 
+int
+xqc_mp_state_classify(xqc_connection_t *conn, int available_path_cnt,
+    int standby_path_cnt)
+{
+    if (!conn->enable_multipath || conn->active_path_count < 2) {
+        return 0;
+    }
+
+    if (available_path_cnt > 0 && standby_path_cnt > 0) {
+        return 1;
+    }
+
+    if (available_path_cnt == 0 && standby_path_cnt > 0) {
+        return 2;
+    }
+
+    if (available_path_cnt > 0 && standby_path_cnt == 0) {
+        return 3;
+    }
+
+    return 0;
+}
+
 void
 xqc_request_path_metrics_print(xqc_connection_t *conn, xqc_h3_stream_t *h3_stream, xqc_request_stats_t *stats)
 {
@@ -1024,20 +1047,8 @@ xqc_request_path_metrics_print(xqc_connection_t *conn, xqc_h3_stream_t *h3_strea
         }
     }
 
-    if (conn->enable_multipath && conn->active_path_count >= 2) {
-        if ((available_path_cnt > 0) && (standby_path_cnt > 0)) {
-            stats->mp_state = 1;
-
-        } else if ((available_path_cnt == 0) && (standby_path_cnt > 0)) {
-            stats->mp_state = 2;
-
-        } else if ((available_path_cnt > 0) && (standby_path_cnt == 0)) {
-            stats->mp_state = 3;
-        }
-
-    } else {
-        stats->mp_state = 0;
-    }
+    stats->mp_state = xqc_mp_state_classify(conn, available_path_cnt,
+                                            standby_path_cnt);
 
     if (aggregate_send_bytes != 0) {
         stats->mp_standby_path_send_weight = (float)(standby_path_send_bytes) / aggregate_send_bytes;

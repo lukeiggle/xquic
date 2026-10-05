@@ -2388,6 +2388,24 @@ XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_stream_stop_sending(xqc_stream_t *stream, uint64_t err_code);
 
 /**
+ * Close statistics of a stream, computed as xqc_h3_request_get_stats does for
+ * a request. Callable from stream_close_notify.
+ */
+typedef struct xqc_stream_close_stats_s {
+    xqc_usec_t  fin_send_time;  /* when the FIN was sent to the socket */
+    xqc_usec_t  fin_ack_time;   /* when the first FIN was acked */
+    int         mp_state;       /* 0 off or single path, 1 mixed,
+                                   2 standby only, 3 available only */
+    int         err;            /* the connection error if any, else
+                                   the stream error */
+    const char *close_msg;      /* static string, or NULL */
+} xqc_stream_close_stats_t;
+
+XQC_EXPORT_PUBLIC_API
+void xqc_stream_get_close_stats(xqc_stream_t *stream,
+    xqc_stream_close_stats_t *out);
+
+/**
  * Recv data in stream.
  * @return bytes read, -XQC_EAGAIN try next time, <0 for error
  */

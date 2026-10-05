@@ -17,6 +17,7 @@
 #include "src/transport/xqc_pacing.h"
 #include "src/tls/xqc_tls.h"
 #include "src/transport/xqc_fec.h"
+#include "src/transport/xqc_multipath.h"
 
 static xqc_stream_id_t
 xqc_gen_stream_id(xqc_connection_t *conn, xqc_stream_type_t type)
@@ -1084,6 +1085,38 @@ xqc_int_t
 xqc_stream_close(xqc_stream_t *stream)
 {
     return xqc_stream_close_with_error(stream, H3_REQUEST_CANCELLED);
+}
+
+void
+xqc_stream_get_close_stats(xqc_stream_t *stream, xqc_stream_close_stats_t *out)
+{
+    xqc_connection_t *conn = stream->stream_conn;
+    int available_path_cnt = 0, standby_path_cnt = 0;
+    xqc_list_head_t *pos, *next;
+    xqc_path_ctx_t *path;
+
+    /* same per-path counting as xqc_request_path_metrics_print */
+    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        xqc_path_metrics_t *m = xqc_stream_path_metrics_find(stream,
+                                                             path->path_id);
+        if (m != NULL && (m->path_send_bytes > 0 || m->path_recv_bytes > 0)) {
+            if (path->app_path_status == XQC_APP_PATH_STATUS_STANDBY) {
+                standby_path_cnt++;
+
+            } else {
+                available_path_cnt++;
+            }
+        }
+    }
+
+    out->fin_send_time = stream->stream_stats.local_fin_snd_time;
+    out->fin_ack_time = stream->stream_stats.first_fin_ack_time;
+    out->mp_state = xqc_mp_state_classify(conn, available_path_cnt,
+                                          standby_path_cnt);
+    out->err = conn->conn_err != 0 ? (int)conn->conn_err
+                                   : (int)stream->stream_err;
+    out->close_msg = stream->stream_close_msg;
 }
 
 /* Send-side half of xqc_stream_close_with_error: RESET_STREAM only. */

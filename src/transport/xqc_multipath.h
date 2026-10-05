@@ -283,6 +283,10 @@ xqc_path_ctx_t *xqc_conn_pick_alt_active_path(xqc_connection_t *conn, xqc_path_c
 
 /* path statistics */
 void xqc_conn_path_metrics_print(xqc_connection_t *conn, xqc_conn_stats_t *stats);
+/* the mp_state of a request: 0 off or single path, 1 mixed, 2 standby only,
+ * 3 available only */
+int xqc_mp_state_classify(xqc_connection_t *conn, int available_path_cnt,
+    int standby_path_cnt);
 void xqc_request_path_metrics_print(xqc_connection_t *conn, xqc_h3_stream_t *h3_stream, xqc_request_stats_t *stats);
 
 void xqc_stream_path_metrics_print(xqc_connection_t *conn, xqc_stream_t *stream, char *buff, size_t buff_size);
