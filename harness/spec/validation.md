@@ -78,7 +78,7 @@ its case is retired so later changes cannot reuse it.
 
 | Range | New-case namespace | Allocated IDs |
 |-------|--------------------|---------------|
-| `[705, 799]` | QUIC Transport core | `705-706` |
+| `[705, 799]` | QUIC Transport core | `705-706`, `731` (`coded_reset_no_echo`), `732` (`reset_after_data_recvd_noop`), `733` (`stop_sending_auto_reply`), `734` (`stop_sending_after_fin_noop`) |
 | `[800, 899]` | Recovery and congestion control | None |
 | `[900, 999]` | QUIC-TLS | None |
 | `[1000, 1099]` | HTTP/3 framing, streams, and settings | `1000-1012` |

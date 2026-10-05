@@ -5649,4 +5649,107 @@ fi
 
 killall test_server 2> /dev/null
 
+
+# ── QUIC transport: one-directional reset and STOP_SENDING (731-734) ──────
+# Raw transport (-T 1). For these case IDs the server logs every
+# stream_peer_abort_notify call to its stdout as |peer_abort|kind:<k>|code:<c>|
+# (kind 0 = RESET_STREAM, 1 = STOP_SENDING) and calls
+# xqc_conn_set_no_reset_echo(conn, 1). 0x10c = 268, 0x10b = 267.
+
+# 731 happy path: the client sends 1 KiB without FIN, then resets only its
+# send side with 0x10c (RFC 9000 Section 3.1). The server is notified with the
+# full code, does not echo the reset, and answers 512 bytes + FIN on its still
+# open send side, which the client reads in full.
+killall test_server 2> /dev/null
+rm -f test_session tp_localhost xqc_token peer_abort_server.log
+${SERVER_BIN} -l d -e -x 731 > peer_abort_server.log &
+sleep 1
+clear_log
+echo -e "coded reset without echo ...\c"
+${CLIENT_BIN} -s 1024 -l d -t 1 -T 1 -x 731 >> clog
+notified=`grep "|peer_abort|kind:0|code:268|" peer_abort_server.log`
+response=`grep "send_body_size:1024, recv_body_size:512 " clog`
+echoed=`grep "xqc_process_reset_stream_frame" clog`
+if [ -n "$notified" ] && [ -n "$response" ] && [ -z "$echoed" ]; then
+    echo ">>>>>>>> pass:1"
+    case_print_result "coded_reset_no_echo" "pass"
+else
+    echo ">>>>>>>> pass:0"
+    case_print_result "coded_reset_no_echo" "fail"
+fi
+
+# 732 abnormal path: the client sends 1 KiB + FIN and calls xqc_stream_reset
+# only after the FIN is acked (Data Recvd). RFC 9000 Section 3.1 allows no
+# RESET_STREAM from Data Recvd, so the call is a no-op: no peer notify, no
+# error.
+killall test_server 2> /dev/null
+rm -f test_session tp_localhost xqc_token peer_abort_server.log
+${SERVER_BIN} -l d -e -x 732 > peer_abort_server.log &
+sleep 1
+clear_log
+echo -e "reset after data recvd is a no-op ...\c"
+${CLIENT_BIN} -s 1024 -l d -t 1 -T 1 -x 732 >> clog
+called=`grep "|reset_called|" clog`
+notified=`grep "|peer_abort|" peer_abort_server.log`
+errlog=`grep_err_log`
+if [ -n "$called" ] && [ -z "$notified" ] && [ -z "$errlog" ]; then
+    echo ">>>>>>>> pass:1"
+    case_print_result "reset_after_data_recvd_noop" "pass"
+else
+    echo ">>>>>>>> pass:0"
+    case_print_result "reset_after_data_recvd_noop" "fail"
+fi
+
+# 733 happy path: the client sends 1 KiB without FIN and STOP_SENDING 0x10b.
+# The server is notified, and xquic's automatic RESET_STREAM
+# (H3_REQUEST_CANCELLED, RFC 9000 Section 3.5) notifies the client. The client
+# also sets no_reset_echo, so its send side stays open: it sends 1 KiB + FIN
+# more, does not echo the reset, and the server reads 2 KiB and the FIN.
+killall test_server 2> /dev/null
+rm -f test_session tp_localhost xqc_token peer_abort_server.log
+${SERVER_BIN} -l d -e -x 733 > peer_abort_server.log &
+sleep 1
+clear_log
+echo -e "STOP_SENDING auto reply ...\c"
+${CLIENT_BIN} -s 1024 -l d -t 1 -T 1 -x 733 >> clog
+stop_seen=`grep "|peer_abort|kind:1|code:267|" peer_abort_server.log`
+reply_seen=`grep "|peer_abort|kind:0|code:268|" clog`
+echoed=`grep "|peer_abort|kind:0|" peer_abort_server.log`
+server_fin=`grep "|recv_fin|bytes:2048|" peer_abort_server.log`
+if [ -n "$stop_seen" ] && [ -n "$reply_seen" ] && [ -z "$echoed" ] \
+    && [ -n "$server_fin" ]; then
+    echo ">>>>>>>> pass:1"
+    case_print_result "stop_sending_auto_reply" "pass"
+else
+    echo ">>>>>>>> pass:0"
+    case_print_result "stop_sending_auto_reply" "fail"
+fi
+
+# 734 abnormal path: the client reads the response FIN (Data Read), then
+# calls xqc_stream_stop_sending. RFC 9000 Section 3.5 sends STOP_SENDING only
+# from Recv or Size Known, so the call is a no-op: no peer notify, no error,
+# and the frame writer's own "beyond DATA_RECVD" guard is never reached.
+killall test_server 2> /dev/null
+rm -f test_session tp_localhost xqc_token peer_abort_server.log
+${SERVER_BIN} -l d -e -x 734 > peer_abort_server.log &
+sleep 1
+clear_log
+echo -e "STOP_SENDING after FIN is a no-op ...\c"
+${CLIENT_BIN} -s 1024 -l d -t 1 -T 1 -x 734 >> clog
+called=`grep "|stop_sending_called|" clog`
+notified=`grep "|peer_abort|kind:1|" peer_abort_server.log`
+writer_guard=`grep "beyond DATA_RECVD" clog`
+errlog=`grep_err_log`
+if [ -n "$called" ] && [ -z "$notified" ] && [ -z "$writer_guard" ] \
+    && [ -z "$errlog" ]; then
+    echo ">>>>>>>> pass:1"
+    case_print_result "stop_sending_after_fin_noop" "pass"
+else
+    echo ">>>>>>>> pass:0"
+    case_print_result "stop_sending_after_fin_noop" "fail"
+fi
+
+killall test_server 2> /dev/null
+rm -f peer_abort_server.log
+
 cd -

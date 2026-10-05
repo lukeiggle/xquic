@@ -77,6 +77,10 @@ printf_null(const char *format, ...)
 #define XQC_TEST_CASE_H3_SINGLE_VINT_OVERLONG 1008
 #define XQC_TEST_CASE_H3_FIELD_SECTION_VALID 1011
 #define XQC_TEST_CASE_H3_FIELD_SECTION_OVER_LIMIT 1012
+#define XQC_TEST_CASE_RESET_NO_ECHO 731
+#define XQC_TEST_CASE_RESET_AFTER_RECVD 732
+#define XQC_TEST_CASE_STOP_AUTO_REPLY 733
+#define XQC_TEST_CASE_STOP_AFTER_FIN 734
 
 typedef struct user_conn_s user_conn_t;
 
@@ -1848,6 +1852,12 @@ xqc_client_conn_create_notify(xqc_connection_t *conn, const xqc_cid_t *cid, void
         printf("[dgram-200]|0RTT|initial_mss:%zu|\n", user_conn->dgram_mss);
     }
 
+    /* the automatic RESET_STREAM answering our STOP_SENDING must not reset
+     * our send side, which still has data to send */
+    if (g_test_case == XQC_TEST_CASE_STOP_AUTO_REPLY) {
+        xqc_conn_set_no_reset_echo(conn, 1);
+    }
+
     printf("xqc_conn_is_ready_to_send_early_data:%d\n", xqc_conn_is_ready_to_send_early_data(conn));
     return 0;
 }
@@ -2406,7 +2416,10 @@ xqc_client_stream_send(xqc_stream_t *stream, void *user_data)
     }
 
     int fin = 1;
-    if (g_test_case == 4) { /* test fin_only */
+    if (g_test_case == 4 /* test fin_only */
+        || g_test_case == XQC_TEST_CASE_RESET_NO_ECHO
+        || g_test_case == XQC_TEST_CASE_STOP_AUTO_REPLY)
+    {
         fin = 0;
     }
 
@@ -2419,6 +2432,16 @@ xqc_client_stream_send(xqc_stream_t *stream, void *user_data)
         } else {
             user_stream->send_offset += ret;
             printf("xqc_stream_send offset=%"PRIu64"\n", user_stream->send_offset);
+
+            /* act once, when the body without FIN has been accepted */
+            if (user_stream->send_offset == user_stream->send_body_len) {
+                if (g_test_case == XQC_TEST_CASE_RESET_NO_ECHO) {
+                    xqc_stream_reset(stream, 0x10c);
+
+                } else if (g_test_case == XQC_TEST_CASE_STOP_AUTO_REPLY) {
+                    xqc_stream_stop_sending(stream, 0x10b);
+                }
+            }
         }
     }
 
@@ -2483,6 +2506,14 @@ xqc_client_stream_read_notify(xqc_stream_t *stream, void *user_data)
 
         } else if (read < 0) {
             printf("xqc_stream_recv error %zd\n", read);
+            /* our send side survived the peer's reset: finish the body */
+            if (read == -XQC_ESTREAM_RESET
+                && g_test_case == XQC_TEST_CASE_STOP_AUTO_REPLY)
+            {
+                xqc_stream_send(stream,
+                                (unsigned char *) user_stream->send_body,
+                                user_stream->send_body_len, 1);
+            }
             return 0;
         }
 
@@ -2530,6 +2561,24 @@ xqc_client_stream_read_notify(xqc_stream_t *stream, void *user_data)
 
     if (fin) {
         user_stream->recv_fin = 1;
+
+        if (g_test_case == XQC_TEST_CASE_RESET_AFTER_RECVD) {
+            /* the 1 KiB body + FIN is one packet: FIN acked is Data Recvd */
+            xqc_stream_close_stats_t cs;
+            xqc_stream_get_close_stats(stream, &cs);
+            if (cs.fin_ack_time != 0) {
+                xqc_stream_reset(stream, 0x10c);
+                printf("|reset_called|\n");
+
+            } else {
+                printf("|reset_skipped|fin_not_acked|\n");
+            }
+
+        } else if (g_test_case == XQC_TEST_CASE_STOP_AFTER_FIN) {
+            xqc_stream_stop_sending(stream, 0x10b);
+            printf("|stop_sending_called|\n");
+        }
+
         xqc_usec_t now_us = xqc_now();
         printf("\033[33m>>>>>>>> request time cost:%"PRIu64" us, speed:%"PRIu64" Kbit/s \n"
                ">>>>>>>> send_body_size:%zu, recv_body_size:%zu \033[0m\n",
@@ -2562,6 +2611,13 @@ xqc_client_stream_read_notify(xqc_stream_t *stream, void *user_data)
 
     }
     return 0;
+}
+
+void
+xqc_client_stream_peer_abort_notify(xqc_stream_t *stream,
+    xqc_stream_peer_abort_t kind, uint64_t err_code, void *user_data)
+{
+    printf("|peer_abort|kind:%d|code:%"PRIu64"|\n", (int) kind, err_code);
 }
 
 int
@@ -5546,6 +5602,11 @@ int main(int argc, char *argv[]) {
             .datagram_mss_updated_notify = xqc_client_datagram_mss_updated_callback,
         }
     };
+
+    if (g_test_case == XQC_TEST_CASE_STOP_AUTO_REPLY) {
+        ap_cbs.stream_cbs.stream_peer_abort_notify =
+            xqc_client_stream_peer_abort_notify;
+    }
 
     xqc_engine_register_alpn(ctx.engine, XQC_ALPN_TRANSPORT, 9, &ap_cbs, NULL);
     /* test alpn negotiation failure */

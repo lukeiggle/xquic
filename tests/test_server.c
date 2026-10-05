@@ -61,6 +61,12 @@ printf_null(const char *format, ...)
 #define XQC_TEST_CASE_H3_SINGLE_VINT_OVERLONG 1008
 #define XQC_TEST_CASE_H3_FIELD_SECTION_VALID 1011
 #define XQC_TEST_CASE_H3_FIELD_SECTION_OVER_LIMIT 1012
+#define XQC_TEST_CASE_RESET_NO_ECHO 731
+#define XQC_TEST_CASE_STOP_AFTER_FIN 734
+
+/* cases 731-734: one-directional reset and STOP_SENDING */
+#define XQC_TEST_CASE_IS_PEER_ABORT(c)                                         \
+    ((c) >= XQC_TEST_CASE_RESET_NO_ECHO && (c) <= XQC_TEST_CASE_STOP_AFTER_FIN)
 
 extern long xqc_random(void);
 extern xqc_usec_t xqc_now();
@@ -777,6 +783,11 @@ xqc_server_conn_create_notify(xqc_connection_t *conn, const xqc_cid_t *cid,
         }
     }
 
+    /* a peer RESET_STREAM leaves our send side open */
+    if (XQC_TEST_CASE_IS_PEER_ABORT(g_test_case)) {
+        xqc_conn_set_no_reset_echo(conn, 1);
+    }
+
     return 0;
 }
 
@@ -942,6 +953,13 @@ xqc_server_stream_create_notify(xqc_stream_t *stream, void *user_data)
     return 0;
 }
 
+void
+xqc_server_stream_peer_abort_notify(xqc_stream_t *stream,
+    xqc_stream_peer_abort_t kind, uint64_t err_code, void *user_data)
+{
+    printf("|peer_abort|kind:%d|code:%" PRIu64 "|\n", (int)kind, err_code);
+}
+
 int
 xqc_server_stream_close_notify(xqc_stream_t *stream, void *user_data)
 {
@@ -998,6 +1016,15 @@ xqc_server_stream_read_notify(xqc_stream_t *stream, void *user_data)
 
         } else if (read < 0) {
             printf("xqc_stream_recv error %zd\n", read);
+            /* the send side is still open: answer 512 bytes + FIN */
+            if (read == -XQC_ESTREAM_RESET
+                && g_test_case == XQC_TEST_CASE_RESET_NO_ECHO
+                && user_stream->send_body == NULL)
+            {
+                user_stream->send_body = calloc(1, 512);
+                user_stream->send_body_len = 512;
+                xqc_server_stream_send(stream, user_data);
+            }
             return 0;
         }
         read_sum += read;
@@ -1024,6 +1051,9 @@ xqc_server_stream_read_notify(xqc_stream_t *stream, void *user_data)
     // user_stream->recv_body_len, fin);
 
     if (fin) {
+        if (XQC_TEST_CASE_IS_PEER_ABORT(g_test_case)) {
+            printf("|recv_fin|bytes:%zu|\n", user_stream->recv_body_len);
+        }
         xqc_server_stream_send(stream, user_data);
     }
     return 0;
@@ -3191,6 +3221,11 @@ main(int argc, char *argv[])
             },
     };
 
+
+    if (XQC_TEST_CASE_IS_PEER_ABORT(g_test_case)) {
+        ap_cbs.stream_cbs.stream_peer_abort_notify =
+            xqc_server_stream_peer_abort_notify;
+    }
 
     /* test NULL stream callback */
     if (g_test_case == 2) {
