@@ -2341,6 +2341,26 @@ XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_stream_close(xqc_stream_t *stream);
 
 /**
+ * Send RESET_STREAM only, with the application error code err_code (up to 62
+ * bits), at the current send offset. Queued stream data is dropped. The receive
+ * side is untouched. No-op once the send side is Data Recvd or later (including
+ * an earlier reset), or when the connection is closing.
+ * @retval XQC_OK for success or no-op, negative errno if a frame write failed
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_stream_reset(xqc_stream_t *stream, uint64_t err_code);
+
+/**
+ * Send STOP_SENDING only, with err_code (up to 62 bits). Acts only while the
+ * receive side is in Recv or Size Known; data arriving later is still readable.
+ * The send side is untouched. No-op otherwise or when the connection is
+ * closing.
+ * @retval XQC_OK for success or no-op, negative errno if a frame write failed
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_stream_stop_sending(xqc_stream_t *stream, uint64_t err_code);
+
+/**
  * Recv data in stream.
  * @return bytes read, -XQC_EAGAIN try next time, <0 for error
  */

@@ -150,6 +150,10 @@ main(int argc, char *argv[])
                 || !CU_add_test(pSuite, "xqc_test_stream_frame_cap_setting", xqc_test_stream_frame_cap_setting)
         || !CU_add_test(pSuite, "xqc_test_stream_implicit_cap_sparse", xqc_test_stream_implicit_cap_sparse)
         || !CU_add_test(pSuite, "xqc_test_stream_implicit_cap_dense", xqc_test_stream_implicit_cap_dense)
+        || !CU_add_test(pSuite, "xqc_test_stream_reset_send_only", xqc_test_stream_reset_send_only)
+        || !CU_add_test(pSuite, "xqc_test_stream_reset_idempotent", xqc_test_stream_reset_idempotent)
+        || !CU_add_test(pSuite, "xqc_test_stream_stop_sending_recv_only", xqc_test_stream_stop_sending_recv_only)
+        || !CU_add_test(pSuite, "xqc_test_stream_stop_sending_after_fin", xqc_test_stream_stop_sending_after_fin)
 #ifdef XQC_ENABLE_TEST_HOOKS
         || !CU_add_test(pSuite, "xqc_test_stream_create_with_id", xqc_test_stream_create_with_id)
 #endif

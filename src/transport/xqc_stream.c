@@ -1086,6 +1086,84 @@ xqc_stream_close(xqc_stream_t *stream)
     return xqc_stream_close_with_error(stream, H3_REQUEST_CANCELLED);
 }
 
+/* Send-side half of xqc_stream_close_with_error: RESET_STREAM only. */
+xqc_int_t
+xqc_stream_reset(xqc_stream_t *stream, uint64_t err_code)
+{
+    xqc_int_t ret;
+    xqc_connection_t *conn = stream->stream_conn;
+
+    /* RFC 9000 Section 3.1: RESET_STREAM is only sent from the Ready, Send
+     * and Data Sent states. Data Recvd and later are terminal for the send
+     * side, and RESET_SENT means it has already been sent. */
+    if (stream->stream_state_send >= XQC_SEND_STREAM_ST_DATA_RECVD) {
+        return XQC_OK;
+    }
+    if (conn->conn_state >= XQC_CONN_STATE_CLOSING) {
+        return XQC_OK;
+    }
+
+    XQC_STREAM_CLOSE_MSG(stream, "local reset");
+
+    /* See xqc_stream_close_with_error for the defer_send_flush caveat. */
+    xqc_send_queue_drop_stream_frame_packets(conn, stream->stream_id);
+    ret = xqc_write_reset_stream_to_packet(conn, stream, err_code,
+                                           stream->stream_send_offset);
+    if (ret < 0) {
+        xqc_log(conn->log, XQC_LOG_ERROR,
+                "|xqc_write_reset_stream_to_packet error|%d|", ret);
+        XQC_CONN_ERR(conn, TRA_INTERNAL_ERROR);
+        return ret;
+    }
+
+    stream->stream_stats.max_pto_backoff =
+        xqc_max(stream->stream_stats.max_pto_backoff,
+                xqc_conn_get_max_pto_backoff(conn, 1));
+
+    xqc_engine_remove_wakeup_queue(conn->engine, conn);
+    xqc_engine_add_active_queue(conn->engine, conn);
+
+    xqc_stream_shutdown_write(stream);
+    xqc_engine_conn_logic(conn->engine, conn);
+    return XQC_OK;
+}
+
+/* Receive-side half of xqc_stream_close_with_error: STOP_SENDING only. */
+xqc_int_t
+xqc_stream_stop_sending(xqc_stream_t *stream, uint64_t err_code)
+{
+    xqc_int_t ret;
+    xqc_connection_t *conn = stream->stream_conn;
+
+    /* RFC 9000 Section 3.5: STOP_SENDING is only sent for a receive side in
+     * Recv or Size Known. The receive state is left to the peer's reply. */
+    if (stream->stream_state_recv != XQC_RECV_STREAM_ST_RECV
+        && stream->stream_state_recv != XQC_RECV_STREAM_ST_SIZE_KNOWN)
+    {
+        return XQC_OK;
+    }
+    if (conn->conn_state >= XQC_CONN_STATE_CLOSING) {
+        return XQC_OK;
+    }
+
+    XQC_STREAM_CLOSE_MSG(stream, "local reset");
+    stream->stream_err = err_code;
+
+    ret = xqc_write_stop_sending_to_packet(conn, stream, err_code);
+    if (ret < 0) {
+        xqc_log(conn->log, XQC_LOG_ERROR,
+                "|xqc_write_stop_sending_to_packet error|%d|", ret);
+        XQC_CONN_ERR(conn, TRA_INTERNAL_ERROR);
+        return ret;
+    }
+
+    xqc_engine_remove_wakeup_queue(conn->engine, conn);
+    xqc_engine_add_active_queue(conn->engine, conn);
+
+    xqc_engine_conn_logic(conn->engine, conn);
+    return XQC_OK;
+}
+
 xqc_int_t
 xqc_insert_passive_stream_hash(xqc_connection_t *conn, int64_t cur_max_sid,
                                xqc_stream_id_t stream_id)
