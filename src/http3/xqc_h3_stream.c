@@ -2212,10 +2212,15 @@ xqc_h3_stream_read_notify(xqc_stream_t *stream, void *user_data)
                  * blocked at the stream window the pause stopped crediting.
                  * Read again now. Each repeat needs the high-water to have
                  * been crossed again, so this ends once the transport data
-                 * is consumed or the application stops draining. */
+                 * is consumed or the application stops draining. Not for a
+                 * request the application closed in the notify, and not for
+                 * a stream now blocked on QPACK, which the next notify
+                 * routes to the blocked-data path instead. */
                 resumed = paused
                           && !(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED)
                           && !(h3s->flags & XQC_HTTP3_STREAM_FLAG_READ_EOF)
+                          && !(h3s->flags & XQC_HTTP3_STREAM_FLAG_ACTIVELY_CLOSED)
+                          && !(h3s->flags & XQC_HTTP3_STREAM_FLAG_QPACK_DECODE_BLOCKED)
                           && (stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
                 if (resumed) {
                     h3s->flags |= XQC_HTTP3_STREAM_IN_READING;

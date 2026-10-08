@@ -664,10 +664,21 @@ resume_park_body(xqc_h3_stream_t *h3s, size_t body)
     return hdr + body;
 }
 
+static int      resume_timer_calls;
+static xqc_usec_t resume_timer_last;
+
+static void
+resume_record_timer(xqc_usec_t wake_after, void *user_data)
+{
+    resume_timer_calls++;
+    resume_timer_last = wake_after;
+}
+
 typedef struct {
     size_t  drained;
     int     notifies;
     int     notifies_while_paused;
+    int     close_after_drain;
 } resume_app_t;
 
 /* An application that keeps up: on every read notify it drains the request
@@ -690,7 +701,27 @@ resume_drain_all_on_notify(xqc_h3_request_t *h3r, xqc_request_notify_flag_t flag
         app->drained += (size_t)n;
     }
     CU_ASSERT_EQUAL(n, -XQC_EAGAIN);
+
+    if (app->close_after_drain) {
+        CU_ASSERT_EQUAL(xqc_h3_request_close(h3r), XQC_OK);
+    }
     return 0;
+}
+
+/* Run one read step the way the engine does, with XQC_ENG_FLAG_RUNNING set
+ * for its duration, recording any engine timer re-arm made from inside it. */
+static void
+resume_read_step_in_engine_run(xqc_connection_t *conn)
+{
+    xqc_engine_t *engine = conn->engine;
+    xqc_set_event_timer_pt saved = engine->eng_callback.set_event_timer;
+
+    engine->eng_callback.set_event_timer = resume_record_timer;
+    resume_timer_calls = 0;
+    engine->eng_flag |= XQC_ENG_FLAG_RUNNING;
+    xqc_process_read_streams(conn);
+    engine->eng_flag &= ~XQC_ENG_FLAG_RUNNING;
+    engine->eng_callback.set_event_timer = saved;
 }
 
 void
@@ -715,9 +746,13 @@ xqc_test_h3_recv_resume_within_engine_pass(void)
      * releases the latch. Nothing else is coming to schedule this stream --
      * the peer is held at the stream window by the credit the pause did not
      * issue -- so the release has to lead to the next read within this same
-     * step, not one packet or timer later. */
-    xqc_process_read_streams(conn);
+     * step, not one packet or timer later. Being inside an engine run, the
+     * releases must not re-arm the engine timer: the run does that on its
+     * way out, and a re-arm per 4 KiB is a timer syscall per 4 KiB for an
+     * event-loop embedder. */
+    resume_read_step_in_engine_run(conn);
 
+    CU_ASSERT_EQUAL(resume_timer_calls, 0);
     CU_ASSERT_TRUE(app.notifies_while_paused > 0);
     CU_ASSERT_EQUAL(h3s->stream->stream_data_in.next_read_offset, parked);
     CU_ASSERT_EQUAL(app.drained, body);
@@ -728,14 +763,34 @@ xqc_test_h3_recv_resume_within_engine_pass(void)
     recv_cap_teardown(h3s, h3c, conn);
 }
 
-static int      resume_timer_calls;
-static xqc_usec_t resume_timer_last;
-
-static void
-resume_record_timer(xqc_usec_t wake_after, void *user_data)
+void
+xqc_test_h3_recv_resume_not_after_close_in_notify(void)
 {
-    resume_timer_calls++;
-    resume_timer_last = wake_after;
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+    resume_route_stream_to_h3(h3s);
+
+    resume_app_t app = {0};
+    app.close_after_drain = 1;
+    h3c->h3_request_callbacks.h3_request_read_notify = resume_drain_all_on_notify;
+    h3s->h3r->user_data = &app;
+
+    conn->conn_settings.h3_recv_body_buf_max = 64;
+    resume_park_body(h3s, 5 * XQC_DATA_BUF_SIZE_4K);
+
+    /* The application drains below the low-water, which releases the latch
+     * and re-arms the stream, and then cancels the request in the same
+     * notify. The release must not turn into another read and another
+     * notify for a request the application has just closed. */
+    resume_read_step_in_engine_run(conn);
+
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_ACTIVELY_CLOSED);
+    CU_ASSERT_EQUAL(app.notifies, 1);
+    CU_ASSERT_EQUAL(h3s->stream->stream_data_in.next_read_offset, XQC_DATA_BUF_SIZE_4K);
+
+    recv_cap_teardown(h3s, h3c, conn);
 }
 
 void

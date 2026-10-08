@@ -789,6 +789,7 @@ xqc_h3_request_recv_body(xqc_h3_request_t *h3_request, unsigned char *recv_buf,
     xqc_list_head_t *pos, *next;
     xqc_list_buf_t *list_buf = NULL;
     uint32_t max_recv_buf;
+    xqc_engine_t *wake_engine = NULL;
 
     *fin = XQC_FALSE;
 
@@ -845,16 +846,22 @@ xqc_h3_request_recv_body(xqc_h3_request_t *h3_request, unsigned char *recv_buf,
     {
         h3_request->h3_stream->flags &= ~XQC_HTTP3_STREAM_FLAG_RECV_PAUSED;
         if (h3_request->h3_stream->stream) {
+            xqc_engine_t *engine = h3_request->h3_stream->h3c->conn->engine;
+
             /* ready_to_read puts the connection on the active queue, but
              * only an engine run services that queue, and the application
              * runs the engine on packet input and on the engine timer.
              * Neither is due: the peer is blocked, and the timer is still
-             * set for the connection's last deadline. Arm it now, as
+             * set for the connection's last deadline. Arm it, as
              * xqc_conn_close() does when it queues work from outside the
-             * engine. A release inside a read notify is handled by
-             * xqc_h3_stream_read_notify() in the same run. */
+             * engine, once this call is done with h3_request. Not needed
+             * while the engine is running: a release from the request's
+             * own read notify is read again by xqc_h3_stream_read_notify(),
+             * and the run re-arms the timer on its way out. */
             xqc_stream_ready_to_read(h3_request->h3_stream->stream);
-            xqc_engine_wakeup_once(h3_request->h3_stream->h3c->conn->engine);
+            if (!(engine->eng_flag & XQC_ENG_FLAG_RUNNING)) {
+                wake_engine = engine;
+            }
         }
     }
 
@@ -873,16 +880,22 @@ xqc_h3_request_recv_body(xqc_h3_request_t *h3_request, unsigned char *recv_buf,
     }
 
     if (n_recv == 0 && !*fin) {
-        return -XQC_EAGAIN;
+        n_recv = -XQC_EAGAIN;
+
+    } else {
+        xqc_log(h3_request->h3_stream->h3c->log, XQC_LOG_DEBUG,
+                "|stream_id:%ui|recv_buf_size:%z|n_recv:%z|body_recvd:%uz|body_recvd_final_"
+                "size:%uz|"
+                "fin:%d|conn:%p|",
+                h3_request->h3_stream->stream_id, recv_buf_size, n_recv,
+                h3_request->body_recvd, h3_request->body_recvd_final_size, *fin,
+                h3_request->h3_stream->h3c->conn);
     }
 
-    xqc_log(h3_request->h3_stream->h3c->log, XQC_LOG_DEBUG,
-            "|stream_id:%ui|recv_buf_size:%z|n_recv:%z|body_recvd:%uz|body_recvd_final_"
-            "size:%uz|"
-            "fin:%d|conn:%p|",
-            h3_request->h3_stream->stream_id, recv_buf_size, n_recv,
-            h3_request->body_recvd, h3_request->body_recvd_final_size, *fin,
-            h3_request->h3_stream->h3c->conn);
+    if (wake_engine) {
+        xqc_engine_wakeup_once(wake_engine);
+    }
+
     return n_recv;
 }
 

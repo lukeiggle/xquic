@@ -1857,18 +1857,20 @@ typedef struct xqc_conn_settings_s {
      * read_notify arrives to prompt another attempt: the stream has been
      * taken off the connection read list and the peer is blocked by the very
      * credit the pause withheld, so nothing will re-arm it. The drain call
-     * itself is the only re-arm, and it does not wait for a packet: called
-     * from the read notify, the stream is read again before the notify
-     * returns; called from outside the engine, it arms the engine timer
-     * (set_event_timer) so the next xqc_engine_main_logic() reads it. An
-     * application must therefore either read to -XQC_EAGAIN inside its
-     * recv-body callback, or own its re-arm and call
-     * xqc_h3_request_recv_body() again from whatever event frees its
-     * downstream capacity -- for a proxy writing into a TCP stack, that is
-     * the stack's send-completion callback, not the next H3 read notify,
-     * because there will not be one. Without this setting the distinction did
-     * not matter, since more inbound data would re-notify; with it, declining
-     * to read is a stall.
+     * itself is the only re-arm, and it does not wait for a packet when it
+     * is made from the request's own read notify (the stream is read again
+     * before the notify returns) or from outside the engine (it arms the
+     * engine timer, set_event_timer, so the next xqc_engine_main_logic()
+     * reads it). A drain made from any other callback during an engine run
+     * -- another stream's notify, a write or datagram notify -- is read on
+     * the connection's next timer or packet. An application must
+     * therefore either read to -XQC_EAGAIN inside its recv-body callback,
+     * or own its re-arm and call xqc_h3_request_recv_body() again from
+     * whatever event frees its downstream capacity -- for a proxy writing
+     * into a TCP stack, that is the stack's send-completion callback, not
+     * the next H3 read notify, because there will not be one. Without this
+     * setting the distinction did not matter, since more inbound data would
+     * re-notify; with it, declining to read is a stall.
      *
      * CONNECTION-LEVEL FLOW CONTROL. A paused request stops advancing
      * conn_flow_ctl.fc_data_read as well as its own stream offset, so the

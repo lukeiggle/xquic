@@ -90,6 +90,10 @@ void xqc_test_h3_conn_get_recv_buffered_bytes(void);
  * connection, now on the active queue, is serviced promptly. A partial
  * drain that stops at or above max/2 schedules nothing. */
 void xqc_test_h3_recv_resume_within_engine_pass(void);
+
+/* A request the application closes in the same notify that released it is
+ * not read again. */
+void xqc_test_h3_recv_resume_not_after_close_in_notify(void);
 void xqc_test_h3_recv_resume_outside_engine_wakes_engine(void);
 
 #endif /* _XQC_H3_RECV_CAP_TEST_H */
