@@ -845,7 +845,16 @@ xqc_h3_request_recv_body(xqc_h3_request_t *h3_request, unsigned char *recv_buf,
     {
         h3_request->h3_stream->flags &= ~XQC_HTTP3_STREAM_FLAG_RECV_PAUSED;
         if (h3_request->h3_stream->stream) {
+            /* ready_to_read puts the connection on the active queue, but
+             * only an engine run services that queue, and the application
+             * runs the engine on packet input and on the engine timer.
+             * Neither is due: the peer is blocked, and the timer is still
+             * set for the connection's last deadline. Arm it now, as
+             * xqc_conn_close() does when it queues work from outside the
+             * engine. A release inside a read notify is handled by
+             * xqc_h3_stream_read_notify() in the same run. */
             xqc_stream_ready_to_read(h3_request->h3_stream->stream);
+            xqc_engine_wakeup_once(h3_request->h3_stream->h3c->conn->engine);
         }
     }
 

@@ -1857,9 +1857,13 @@ typedef struct xqc_conn_settings_s {
      * read_notify arrives to prompt another attempt: the stream has been
      * taken off the connection read list and the peer is blocked by the very
      * credit the pause withheld, so nothing will re-arm it. The drain call
-     * itself is the only re-arm. An application must therefore either read
-     * to -XQC_EAGAIN inside its recv-body callback, or own its re-arm and
-     * call xqc_h3_request_recv_body() again from whatever event frees its
+     * itself is the only re-arm, and it does not wait for a packet: called
+     * from the read notify, the stream is read again before the notify
+     * returns; called from outside the engine, it arms the engine timer
+     * (set_event_timer) so the next xqc_engine_main_logic() reads it. An
+     * application must therefore either read to -XQC_EAGAIN inside its
+     * recv-body callback, or own its re-arm and call
+     * xqc_h3_request_recv_body() again from whatever event frees its
      * downstream capacity -- for a proxy writing into a TCP stack, that is
      * the stack's send-completion callback, not the next H3 read notify,
      * because there will not be one. Without this setting the distinction did
