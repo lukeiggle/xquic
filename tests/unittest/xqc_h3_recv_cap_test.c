@@ -623,3 +623,182 @@ xqc_test_h3_conn_get_recv_buffered_bytes(void)
 
     recv_cap_teardown(h3s, h3c, conn);
 }
+
+/* ------------------------------------------------------------------ */
+/* Resuming a paused request without a new packet.                     */
+/* ------------------------------------------------------------------ */
+
+/* Give the fixture connection the transport stream callbacks an h3 ALPN
+ * connection gets (the fixture connects with a bare transport ALPN), so
+ * xqc_process_read_streams() -- the read step of an engine pass -- reaches
+ * xqc_h3_stream_process_data() through the real read notify. */
+static void
+resume_route_stream_to_h3(xqc_h3_stream_t *h3s)
+{
+    xqc_connection_t *conn = h3s->stream->stream_conn;
+    CU_ASSERT_PTR_EQUAL_FATAL(h3s->stream->user_data, h3s);
+    CU_ASSERT_PTR_EQUAL_FATAL(h3s->stream->stream_if, &conn->app_proto_cbs.stream_cbs);
+    conn->app_proto_cbs.stream_cbs = h3_stream_callbacks;
+}
+
+/* Park one DATA frame of `body` bytes in the transport receive queue as a
+ * single contiguous run and put the stream on the connection read list, as
+ * an inbound STREAM frame would. `body` must be larger than one 4 KiB read
+ * for the pause to have something left to hold back. Returns the total
+ * transport bytes parked. */
+static size_t
+resume_park_body(xqc_h3_stream_t *h3s, size_t body)
+{
+    size_t hdr = 5;                     /* type + 4-byte length varint */
+    unsigned char *frame = xqc_malloc(hdr + body);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(frame);
+    frame[0] = 0x00;                                    /* DATA */
+    frame[1] = (unsigned char)(0x80 | ((body >> 24) & 0x3f));
+    frame[2] = (unsigned char)((body >> 16) & 0xff);
+    frame[3] = (unsigned char)((body >> 8) & 0xff);
+    frame[4] = (unsigned char)(body & 0xff);
+    memset(frame + hdr, 'r', body);
+    xqc_test_push_stream_frame(h3s->stream, 0, frame, hdr + body, 0);
+    xqc_free(frame);
+    xqc_stream_ready_to_read(h3s->stream);
+    return hdr + body;
+}
+
+typedef struct {
+    size_t  drained;
+    int     notifies;
+    int     notifies_while_paused;
+} resume_app_t;
+
+/* An application that keeps up: on every read notify it drains the request
+ * until -XQC_EAGAIN. */
+static int
+resume_drain_all_on_notify(xqc_h3_request_t *h3r, xqc_request_notify_flag_t flag,
+    void *user_data)
+{
+    resume_app_t *app = (resume_app_t *)user_data;
+    unsigned char buf[1024];
+    uint8_t fin = 0;
+    ssize_t n;
+
+    app->notifies++;
+    if (h3r->h3_stream->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED) {
+        app->notifies_while_paused++;
+    }
+
+    while ((n = xqc_h3_request_recv_body(h3r, buf, sizeof(buf), &fin)) > 0) {
+        app->drained += (size_t)n;
+    }
+    CU_ASSERT_EQUAL(n, -XQC_EAGAIN);
+    return 0;
+}
+
+void
+xqc_test_h3_recv_resume_within_engine_pass(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+    resume_route_stream_to_h3(h3s);
+
+    resume_app_t app = {0};
+    h3c->h3_request_callbacks.h3_request_read_notify = resume_drain_all_on_notify;
+    h3s->h3r->user_data = &app;
+
+    conn->conn_settings.h3_recv_body_buf_max = 64;
+    size_t body = 5 * XQC_DATA_BUF_SIZE_4K;
+    size_t parked = resume_park_body(h3s, body);
+
+    /* One read step. Each 4 KiB transport read crosses the high-water and
+     * pauses the stream; the notify that follows drains it to empty, which
+     * releases the latch. Nothing else is coming to schedule this stream --
+     * the peer is held at the stream window by the credit the pause did not
+     * issue -- so the release has to lead to the next read within this same
+     * step, not one packet or timer later. */
+    xqc_process_read_streams(conn);
+
+    CU_ASSERT_TRUE(app.notifies_while_paused > 0);
+    CU_ASSERT_EQUAL(h3s->stream->stream_data_in.next_read_offset, parked);
+    CU_ASSERT_EQUAL(app.drained, body);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, 0);
+    CU_ASSERT_FALSE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_FALSE(h3s->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+
+    recv_cap_teardown(h3s, h3c, conn);
+}
+
+static int      resume_timer_calls;
+static xqc_usec_t resume_timer_last;
+
+static void
+resume_record_timer(xqc_usec_t wake_after, void *user_data)
+{
+    resume_timer_calls++;
+    resume_timer_last = wake_after;
+}
+
+void
+xqc_test_h3_recv_resume_outside_engine_wakes_engine(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+    resume_route_stream_to_h3(h3s);
+    xqc_engine_t *engine = conn->engine;
+
+    /* No read notify: this application drains later, from its own event
+     * loop, when its consumer has room. */
+    conn->conn_settings.h3_recv_body_buf_max = 64;
+    resume_park_body(h3s, 5 * XQC_DATA_BUF_SIZE_4K);
+
+    xqc_process_read_streams(conn);
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_EQUAL(h3s->stream->stream_data_in.next_read_offset, XQC_DATA_BUF_SIZE_4K);
+    CU_ASSERT_FALSE(h3s->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+    size_t buffered = h3s->h3r->body_buf_bytes;
+
+    /* The engine is idle: the pass is over and the connection waits in the
+     * wakeup queue for a timer well in the future. */
+    xqc_engine_remove_active_queue(engine, conn);
+    conn->next_tick_time = xqc_monotonic_timestamp() + 10 * 1000000;
+    xqc_engine_add_wakeup_queue(engine, conn);
+    CU_ASSERT_TRUE(conn->conn_flag & XQC_CONN_FLAG_WAIT_WAKEUP);
+    engine->eng_callback.set_event_timer = resume_record_timer;
+    resume_timer_calls = 0;
+
+    /* A partial drain that stops at or above max/2 is the documented
+     * hysteresis: still paused, nothing scheduled. */
+    unsigned char out[XQC_DATA_BUF_SIZE_4K];
+    uint8_t fin = 0;
+    size_t keep = 40;                   /* >= 64 / 2 */
+    CU_ASSERT_EQUAL(xqc_h3_request_recv_body(h3s->h3r, out, buffered - keep, &fin),
+                    (ssize_t)(buffered - keep));
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_FALSE(h3s->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+    CU_ASSERT_TRUE(conn->conn_flag & XQC_CONN_FLAG_WAIT_WAKEUP);
+    CU_ASSERT_EQUAL(resume_timer_calls, 0);
+
+    /* Draining below max/2 releases the latch. The stream goes back on the
+     * read list and the connection onto the active queue -- but the active
+     * queue is only serviced by xqc_engine_main_logic(), which the
+     * application runs from packet input and from the engine timer. No
+     * packet is coming, and the timer is still set for the old deadline, so
+     * the release has to re-arm the timer itself. */
+    CU_ASSERT_EQUAL(xqc_h3_request_recv_body(h3s->h3r, out, sizeof(out), &fin),
+                    (ssize_t)keep);
+    CU_ASSERT_FALSE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_TRUE(h3s->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+    CU_ASSERT_TRUE(conn->conn_flag & XQC_CONN_FLAG_TICKING);
+    CU_ASSERT_FALSE(conn->conn_flag & XQC_CONN_FLAG_WAIT_WAKEUP);
+    CU_ASSERT_EQUAL(resume_timer_calls, 1);
+    CU_ASSERT_TRUE(resume_timer_last <= 1);
+
+    /* And the read step of that pass picks the stream up. */
+    xqc_process_read_streams(conn);
+    CU_ASSERT_EQUAL(h3s->stream->stream_data_in.next_read_offset,
+                    2 * XQC_DATA_BUF_SIZE_4K);
+
+    recv_cap_teardown(h3s, h3c, conn);
+}

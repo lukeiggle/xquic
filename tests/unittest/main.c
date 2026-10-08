@@ -589,6 +589,8 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_h3_recv_close_while_paused", xqc_test_h3_recv_close_while_paused)
         || !CU_add_test(pSuite, "xqc_test_h3_recv_pause_bounds_overshoot_to_one_read", xqc_test_h3_recv_pause_bounds_overshoot_to_one_read)
         || !CU_add_test(pSuite, "xqc_test_h3_conn_get_recv_buffered_bytes", xqc_test_h3_conn_get_recv_buffered_bytes)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_resume_within_engine_pass", xqc_test_h3_recv_resume_within_engine_pass)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_resume_outside_engine_wakes_engine", xqc_test_h3_recv_resume_outside_engine_wakes_engine)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

@@ -82,4 +82,14 @@ void xqc_test_h3_recv_pause_bounds_overshoot_to_one_read(void);
 /* The public accessor, including its NULL contract. */
 void xqc_test_h3_conn_get_recv_buffered_bytes(void);
 
+/* Resuming without a new packet. While paused the peer is held at the
+ * stream window, so once the application drains below max/2 nothing on the
+ * wire will schedule the stream again; the release itself has to. From a
+ * read notify that means the next read happens in the same engine pass;
+ * from outside the engine it means the engine timer is re-armed so the
+ * connection, now on the active queue, is serviced promptly. A partial
+ * drain that stops at or above max/2 schedules nothing. */
+void xqc_test_h3_recv_resume_within_engine_pass(void);
+void xqc_test_h3_recv_resume_outside_engine_wakes_engine(void);
+
 #endif /* _XQC_H3_RECV_CAP_TEST_H */
