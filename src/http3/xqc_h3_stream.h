@@ -87,7 +87,8 @@ typedef enum {
        drains below half that value. Latched (not recomputed per read) so the
        hysteresis gap between the two watermarks is honoured. Only ever set
        while h3_recv_body_buf_max is non-zero, and released by the next
-       xqc_h3_request_recv_body() if that setting has since become 0. */
+       xqc_h3_request_recv_body() if that setting has since become 0, or by
+       xqc_h3_stream_close(), which discards the unread body. */
     XQC_HTTP3_STREAM_FLAG_RECV_PAUSED = 0x4000,
 } xqc_h3_stream_flag;
 

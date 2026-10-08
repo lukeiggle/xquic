@@ -857,3 +857,107 @@ xqc_test_h3_recv_resume_outside_engine_wakes_engine(void)
 
     recv_cap_teardown(h3s, h3c, conn);
 }
+
+/* ------------------------------------------------------------------ */
+/* Closing a paused request after the peer has sent everything.        */
+/* ------------------------------------------------------------------ */
+
+static int close_paused_read_notifies;
+static int close_paused_request_destroyed;
+
+/* An application that has stopped reading: it is told about the body and
+ * leaves it where it is, which is what holds the request at the high-water. */
+static int
+close_paused_ignore_body(xqc_h3_request_t *h3r, xqc_request_notify_flag_t flag,
+    void *user_data)
+{
+    close_paused_read_notifies++;
+    return 0;
+}
+
+static int
+close_paused_count_destroy(xqc_h3_request_t *h3r, void *user_data)
+{
+    close_paused_request_destroyed++;
+    return 0;
+}
+
+void
+xqc_test_h3_recv_close_paused_after_fin(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+    resume_route_stream_to_h3(h3s);
+    xqc_stream_t *stream = h3s->stream;
+
+    close_paused_read_notifies = 0;
+    close_paused_request_destroyed = 0;
+    h3c->h3_request_callbacks.h3_request_read_notify = close_paused_ignore_body;
+    h3c->h3_request_callbacks.h3_request_close_notify = close_paused_count_destroy;
+    conn->conn_settings.h3_recv_body_buf_max = 64;
+
+    /* The whole body, FIN included, arrives inside the credit the stream had
+     * before it paused: the receive side is Data Recvd, with most of the body
+     * still unread in the transport queue. */
+    size_t body = 5 * XQC_DATA_BUF_SIZE_4K;
+    size_t hdr = 5;                     /* type + 4-byte length varint */
+    unsigned char *frame = xqc_malloc(hdr + body);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(frame);
+    frame[0] = 0x00;                                    /* DATA */
+    frame[1] = (unsigned char)(0x80 | ((body >> 24) & 0x3f));
+    frame[2] = (unsigned char)((body >> 16) & 0xff);
+    frame[3] = (unsigned char)((body >> 8) & 0xff);
+    frame[4] = (unsigned char)(body & 0xff);
+    memset(frame + hdr, 'f', body);
+    xqc_test_push_stream_frame(stream, 0, frame, hdr + body, 1);
+    xqc_free(frame);
+    xqc_stream_recv_state_update(stream, XQC_RECV_STREAM_ST_DATA_RECVD);
+    xqc_stream_ready_to_read(stream);
+
+    xqc_process_read_streams(conn);
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_EQUAL(stream->stream_data_in.next_read_offset, XQC_DATA_BUF_SIZE_4K);
+    CU_ASSERT_EQUAL(stream->stream_state_recv, XQC_RECV_STREAM_ST_DATA_RECVD);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, XQC_DATA_BUF_SIZE_4K - hdr);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, XQC_DATA_BUF_SIZE_4K - hdr);
+    int notifies = close_paused_read_notifies;
+    CU_ASSERT_TRUE(notifies > 0);
+
+    /* The application gives up on the request without reading it. The
+     * parked body has to go with it, and the unread transport data has to be
+     * consumed so the receive side reaches Data Read: a peer in Data Recvd
+     * has nothing to reset, so no peer action is coming to do it instead.
+     * The dropped data is not offered to the application it was closed by. */
+    CU_ASSERT_EQUAL(xqc_h3_request_close(h3s->h3r), XQC_OK);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, 0);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 0);
+    CU_ASSERT_FALSE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_EQUAL(stream->stream_state_recv, XQC_RECV_STREAM_ST_DATA_READ);
+    CU_ASSERT_EQUAL(stream->stream_data_in.next_read_offset, hdr + body);
+    CU_ASSERT_EQUAL(stream->stream_data_in.buffered_frame_count, 0);
+    CU_ASSERT_EQUAL(stream->stream_state_send, XQC_SEND_STREAM_ST_RESET_SENT);
+    CU_ASSERT_EQUAL(close_paused_read_notifies, notifies);
+    CU_ASSERT_EQUAL(close_paused_request_destroyed, 0);
+
+    /* The peer acknowledges the RESET_STREAM the close sent; with both sides
+     * terminal the stream joins the closing list, and the close timer
+     * destroys it together with its h3 stream and request. */
+    xqc_stream_send_state_update(stream, XQC_SEND_STREAM_ST_RESET_RECVD);
+    xqc_stream_maybe_need_close(stream);
+    CU_ASSERT_TRUE(stream->stream_flag & XQC_STREAM_FLAG_NEED_CLOSE);
+    CU_ASSERT_FALSE(xqc_list_empty(&conn->conn_closing_streams));
+
+    xqc_timer_t *timer = &conn->conn_timer_manager.timer[XQC_TIMER_STREAM_CLOSE];
+    timer->timeout_cb(XQC_TIMER_STREAM_CLOSE, stream->stream_close_time, timer->user_data);
+    CU_ASSERT_EQUAL(close_paused_request_destroyed, 1);
+    CU_ASSERT_TRUE(xqc_list_empty(&conn->conn_closing_streams));
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 0);
+
+    /* The stream and h3 stream are gone; only the connections remain. */
+    xqc_h3_conn_destroy(h3c);
+    if (conn->alpn) {
+        xqc_free(conn->alpn);
+    }
+}

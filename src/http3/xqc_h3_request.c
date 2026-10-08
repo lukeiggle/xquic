@@ -148,6 +148,15 @@ xqc_h3_request_destroy(xqc_h3_request_t *h3_request)
     xqc_free(h3_request);
 }
 
+void
+xqc_h3_request_discard_body(xqc_h3_request_t *h3_request)
+{
+    xqc_h3_request_body_buf_credit(h3_request, h3_request->body_buf_bytes);
+    xqc_list_buf_list_free(&h3_request->body_buf);
+    h3_request->body_buf_count = 0;
+    h3_request->read_flag &= ~XQC_REQ_NOTIFY_READ_BODY;
+}
+
 xqc_int_t
 xqc_h3_request_close(xqc_h3_request_t *h3_request)
 {

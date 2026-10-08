@@ -1896,6 +1896,12 @@ typedef struct xqc_conn_settings_s {
      * setting and keeps reading into the blocked-buffer list. That path has
      * its own bound, max_blocked_buf_per_stream.
      *
+     * CLOSING A PAUSED REQUEST. xqc_h3_request_close() on a paused request
+     * frees its unread body at once. If the peer has already sent the whole
+     * body, the transport data still unread is consumed and dropped too, so
+     * the stream can finish closing without waiting for a peer reset; no
+     * read notify is raised for the dropped data.
+     *
      * Per-request, not per-connection. The worst case a single request can
      * hold in HEAP is therefore this value, plus one XQC_DATA_BUF_SIZE_4K of
      * overshoot, plus max_blocked_buf_per_stream; and the aggregate bound is

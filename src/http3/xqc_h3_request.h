@@ -41,10 +41,10 @@ typedef struct xqc_h3_request_s {
      * application. Invariant: equals the sum of (data_len - consumed_len)
      * over body_buf. It grows at exactly one site, the DATA-frame append in
      * xqc_h3_stream_process_request(), and shrinks at exactly one,
-     * xqc_h3_request_body_buf_credit(), through which both the drain in
-     * xqc_h3_request_recv_body() and xqc_h3_request_destroy() return their
-     * charge. Every one of those deltas is mirrored into
-     * xqc_h3_conn_t.h3_recv_buffered_bytes. */
+     * xqc_h3_request_body_buf_credit(), through which the drain in
+     * xqc_h3_request_recv_body(), xqc_h3_request_discard_body() and
+     * xqc_h3_request_destroy() all return their charge. Every one of those
+     * deltas is mirrored into xqc_h3_conn_t.h3_recv_buffered_bytes. */
     size_t                          body_buf_bytes;
     size_t                          body_recvd;
     size_t                          body_recvd_final_size;
@@ -102,6 +102,11 @@ xqc_h3_request_t *xqc_h3_request_create_inner(xqc_h3_conn_t *h3_conn, xqc_h3_str
     void *user_data);
 
 void xqc_h3_request_destroy(xqc_h3_request_t *h3_request);
+
+/* Free the body received but not yet handed to the application, crediting it
+ * back to the request and connection counters. For a request whose body the
+ * application has abandoned; the request itself stays live. */
+void xqc_h3_request_discard_body(xqc_h3_request_t *h3_request);
 
 /**
  * @brief notify events

@@ -592,6 +592,7 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_h3_recv_resume_within_engine_pass", xqc_test_h3_recv_resume_within_engine_pass)
         || !CU_add_test(pSuite, "xqc_test_h3_recv_resume_not_after_close_in_notify", xqc_test_h3_recv_resume_not_after_close_in_notify)
         || !CU_add_test(pSuite, "xqc_test_h3_recv_resume_outside_engine_wakes_engine", xqc_test_h3_recv_resume_outside_engine_wakes_engine)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_close_paused_after_fin", xqc_test_h3_recv_close_paused_after_fin)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

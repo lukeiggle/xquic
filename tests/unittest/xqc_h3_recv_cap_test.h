@@ -96,4 +96,12 @@ void xqc_test_h3_recv_resume_within_engine_pass(void);
 void xqc_test_h3_recv_resume_not_after_close_in_notify(void);
 void xqc_test_h3_recv_resume_outside_engine_wakes_engine(void);
 
+/* A request the application closes while paused, after the peer has sent its
+ * whole body, still finishes closing. The close frees the parked body and
+ * drops the unread transport data, so both counters return to zero at once
+ * and the stream is destroyed once its send side is done. Without that the
+ * receive side stays in Data Recvd -- the peer has nothing to reset -- and
+ * the stream, its frames and its body are held until the connection ends. */
+void xqc_test_h3_recv_close_paused_after_fin(void);
+
 #endif /* _XQC_H3_RECV_CAP_TEST_H */

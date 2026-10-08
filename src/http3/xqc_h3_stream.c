@@ -49,6 +49,54 @@ xqc_h3_stream_create(xqc_h3_conn_t *h3c, xqc_stream_t *stream, xqc_h3_stream_typ
     return h3s;
 }
 
+/* The application closed a request it had stopped reading at the
+ * h3_recv_body_buf_max high-water. Nobody will read its body now, so the
+ * drain that would release the pause is never coming.
+ *
+ * The parked body is freed at once. If the peer has already sent everything
+ * (Data Recvd), the unread transport data is consumed and dropped as well, so
+ * the receive side reaches Data Read and the stream can close once its send
+ * side is done. Nothing else would get it there: xqc_stream_close_with_error()
+ * sends STOP_SENDING only in Recv and Size Known, and a peer in Data Recvd
+ * has nothing left to reset (RFC 9000, Section 3.1), so without this the
+ * stream, its unread frames and the request would stay allocated until the
+ * connection closes. The dropped bytes are not parsed: the request is being
+ * cancelled, which is also what a peer reset does to unread frames. In the
+ * other receive states the STOP_SENDING that the close sends brings a reset,
+ * or the frames still to come re-arm the read; the cleared pause lets either
+ * one through. */
+static void
+xqc_h3_stream_abandon_paused_recv(xqc_h3_stream_t *h3s)
+{
+    xqc_stream_t *stream = h3s->stream;
+    unsigned char buff[XQC_DATA_BUF_SIZE_4K];
+    uint8_t fin = 0;
+    ssize_t read;
+    size_t dropped = 0;
+
+    h3s->flags &= ~XQC_HTTP3_STREAM_FLAG_RECV_PAUSED;
+
+    if (h3s->type != XQC_H3_STREAM_TYPE_REQUEST || h3s->h3r == NULL) {
+        return;
+    }
+
+    xqc_h3_request_discard_body(h3s->h3r);
+
+    if (stream->stream_state_recv != XQC_RECV_STREAM_ST_DATA_RECVD) {
+        return;
+    }
+
+    do {
+        read = xqc_stream_recv(stream, buff, sizeof(buff), &fin);
+        if (read > 0) {
+            dropped += (size_t)read;
+        }
+    } while (read > 0 && !fin);
+
+    xqc_log(h3s->log, XQC_LOG_DEBUG, "|paused request closed|stream_id:%ui|dropped:%uz"
+            "|recv_state:%d|", h3s->stream_id, dropped, stream->stream_state_recv);
+}
+
 /* close h3 stream actively */
 xqc_int_t
 xqc_h3_stream_close(xqc_h3_stream_t *h3s)
@@ -69,6 +117,10 @@ xqc_h3_stream_close(xqc_h3_stream_t *h3s)
         return XQC_OK;
 
     } else {
+        if (h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED) {
+            xqc_h3_stream_abandon_paused_recv(h3s);
+        }
+
         /*
          * lifetime of stream and h3 stream synchronizes,
          * will destroy h3 stream during stream close notify
@@ -1901,6 +1953,10 @@ xqc_h3_stream_process_blocked_data(xqc_stream_t *stream, xqc_h3_stream_t *h3s,
  * also shuts the read side and calls xqc_stream_maybe_need_close(). Honouring
  * the pause there would swallow the reset and strand the stream, because the
  * peer is gone and the drain that releases the latch is never coming.
+ *
+ * A request the application has closed is never paused, for the same reason:
+ * the close clears the latch (xqc_h3_stream_abandon_paused_recv), and this
+ * keeps body read after the close from latching it again.
  */
 static xqc_bool_t
 xqc_h3_stream_recv_paused(xqc_h3_stream_t *h3s)
@@ -1908,6 +1964,7 @@ xqc_h3_stream_recv_paused(xqc_h3_stream_t *h3s)
     return h3s->type == XQC_H3_STREAM_TYPE_REQUEST
            && h3s->h3r != NULL
            && (h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED)
+           && !(h3s->flags & XQC_HTTP3_STREAM_FLAG_ACTIVELY_CLOSED)
            && h3s->stream->stream_state_recv < XQC_RECV_STREAM_ST_RESET_RECVD;
 }
 
