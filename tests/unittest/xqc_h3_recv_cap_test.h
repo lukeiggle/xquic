@@ -103,6 +103,7 @@ void xqc_test_h3_recv_resume_outside_engine_wakes_engine(void);
  * receive side stays in Data Recvd -- the peer has nothing to reset -- and
  * the stream, its frames and its body are held until the connection ends. */
 void xqc_test_h3_recv_close_paused_after_fin(void);
+void xqc_test_h3_recv_close_paused_then_fin(void);
 
 /* A paused request whose peer keeps sending small STREAM frames inside the
  * stream window. Each unread frame is a node in the transport receive queue,

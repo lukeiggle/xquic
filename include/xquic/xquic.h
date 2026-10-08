@@ -1936,7 +1936,11 @@ typedef struct xqc_conn_settings_s {
      * frees its unread body at once. If the peer has already sent the whole
      * body, the transport data still unread is consumed and dropped too, so
      * the stream can finish closing without waiting for a peer reset; no
-     * read notify is raised for the dropped data.
+     * read notify is raised for the dropped data. Frames that are still
+     * arriving after the close (until the peer acts on the STOP_SENDING it
+     * sends) are read as for any closed request: they are held in the
+     * request past this value, with read notifies, and freed when the
+     * request is destroyed.
      *
      * Per-request, not per-connection. The worst case a single request can
      * hold in HEAP is therefore this value, plus one XQC_DATA_BUF_SIZE_4K of

@@ -964,6 +964,101 @@ xqc_test_h3_recv_close_paused_after_fin(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Closing a paused request before the peer has sent everything.       */
+/* ------------------------------------------------------------------ */
+
+void
+xqc_test_h3_recv_close_paused_then_fin(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+    resume_route_stream_to_h3(h3s);
+    xqc_stream_t *stream = h3s->stream;
+
+    close_paused_read_notifies = 0;
+    close_paused_request_destroyed = 0;
+    h3c->h3_request_callbacks.h3_request_read_notify = close_paused_ignore_body;
+    h3c->h3_request_callbacks.h3_request_close_notify = close_paused_count_destroy;
+    conn->conn_settings.h3_recv_body_buf_max = 64;
+
+    /* One DATA frame of 5 x 4 KiB. Only the first three quarters have
+     * arrived and no FIN yet: the receive side is Recv, and the pause holds
+     * the rest of what did arrive in the transport queue. */
+    size_t body = 5 * XQC_DATA_BUF_SIZE_4K;
+    size_t first = 3 * XQC_DATA_BUF_SIZE_4K;
+    size_t hdr = 5;                     /* type + 4-byte length varint */
+    unsigned char *frame = xqc_malloc(hdr + body);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(frame);
+    frame[0] = 0x00;                                    /* DATA */
+    frame[1] = (unsigned char)(0x80 | ((body >> 24) & 0x3f));
+    frame[2] = (unsigned char)((body >> 16) & 0xff);
+    frame[3] = (unsigned char)((body >> 8) & 0xff);
+    frame[4] = (unsigned char)(body & 0xff);
+    memset(frame + hdr, 'f', body);
+    xqc_test_push_stream_frame(stream, 0, frame, hdr + first, 0);
+    xqc_stream_ready_to_read(stream);
+
+    xqc_process_read_streams(conn);
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_EQUAL(stream->stream_data_in.next_read_offset, XQC_DATA_BUF_SIZE_4K);
+    CU_ASSERT_EQUAL(stream->stream_state_recv, XQC_RECV_STREAM_ST_RECV);
+
+    /* The application gives up on the request. The parked body goes and the
+     * pause is cleared; the receive side is still Recv, so the unread
+     * transport data stays queued for the frames that are still to come. */
+    CU_ASSERT_EQUAL(xqc_h3_request_close(h3s->h3r), XQC_OK);
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_ACTIVELY_CLOSED);
+    CU_ASSERT_FALSE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, 0);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 0);
+    CU_ASSERT_EQUAL(stream->stream_state_recv, XQC_RECV_STREAM_ST_RECV);
+    CU_ASSERT_EQUAL(stream->stream_data_in.next_read_offset, XQC_DATA_BUF_SIZE_4K);
+
+    /* The rest of the body and the FIN arrive before the peer acts on the
+     * STOP_SENDING the close sent. Reading them re-crosses the high-water on
+     * the closed request's own buffer, which must not hold the stream: no
+     * drain is coming for a closed request, so a pause here would leave the
+     * receive side short of Data Read for good. */
+    xqc_test_push_stream_frame(stream, hdr + first, frame + hdr + first, body - first, 1);
+    xqc_free(frame);
+    xqc_stream_recv_state_update(stream, XQC_RECV_STREAM_ST_DATA_RECVD);
+    xqc_stream_ready_to_read(stream);
+
+    xqc_process_read_streams(conn);
+    CU_ASSERT_EQUAL(stream->stream_data_in.next_read_offset, hdr + body);
+    CU_ASSERT_EQUAL(stream->stream_data_in.buffered_frame_count, 0);
+    CU_ASSERT_EQUAL(stream->stream_state_recv, XQC_RECV_STREAM_ST_DATA_READ);
+    CU_ASSERT_TRUE(xqc_list_empty(&conn->conn_read_streams));
+
+    /* What was read after the close sits in the closed request's buffer, in
+     * step with the connection sum, until the request is destroyed. */
+    CU_ASSERT_TRUE(h3s->h3r->body_buf_bytes > 0);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, h3s->h3r->body_buf_bytes);
+
+    /* The peer acknowledges the RESET_STREAM; with both sides terminal the
+     * stream joins the closing list, and the close timer destroys it together
+     * with its h3 stream and request. */
+    CU_ASSERT_EQUAL(stream->stream_state_send, XQC_SEND_STREAM_ST_RESET_SENT);
+    xqc_stream_send_state_update(stream, XQC_SEND_STREAM_ST_RESET_RECVD);
+    xqc_stream_maybe_need_close(stream);
+    CU_ASSERT_TRUE(stream->stream_flag & XQC_STREAM_FLAG_NEED_CLOSE);
+    CU_ASSERT_FALSE(xqc_list_empty(&conn->conn_closing_streams));
+
+    xqc_timer_t *timer = &conn->conn_timer_manager.timer[XQC_TIMER_STREAM_CLOSE];
+    timer->timeout_cb(XQC_TIMER_STREAM_CLOSE, stream->stream_close_time, timer->user_data);
+    CU_ASSERT_EQUAL(close_paused_request_destroyed, 1);
+    CU_ASSERT_TRUE(xqc_list_empty(&conn->conn_closing_streams));
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 0);
+
+    xqc_h3_conn_destroy(h3c);
+    if (conn->alpn) {
+        xqc_free(conn->alpn);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* A paused request fed in many STREAM frames.                         */
 /* ------------------------------------------------------------------ */
 
