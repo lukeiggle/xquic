@@ -19,4 +19,14 @@ void xqc_test_bbr2_fc_advance_guarded_cruise(void);
  * PROBE_DOWN, and is not spent by a condition that finds nothing to promote. */
 void xqc_test_bbr2_fc_advance_guarded_new_cycle(void);
 
+/* A loss that is too high during a probe lowers inflight_hi to the
+ * in-flight level of the lossy sample, however far below inflight_hi that
+ * is, when the bandwidth estimate is low. */
+void xqc_test_bbr2_inflight_hi_cut_unfloored(void);
+
+/* With XQC_BBR2_FLAG_INFLIGHT_HI_FLOOR the same loss lowers it by at most
+ * 30%; a loss near inflight_hi, an unset inflight_hi and an app-limited
+ * sample are handled as before. */
+void xqc_test_bbr2_inflight_hi_cut_floored(void);
+
 #endif /* _XQC_BBR2_GUARD_TEST_H */

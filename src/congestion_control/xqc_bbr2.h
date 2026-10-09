@@ -154,6 +154,8 @@ typedef struct xqc_bbr2_s {
     uint32_t            inflight_lo;
     /* upper bound of inflight data range */
     uint32_t            inflight_hi;
+    /* XQC_BBR2_FLAG_INFLIGHT_HI_FLOOR */
+    bool                inflight_hi_floor_on;
     /* packets delivered per inflight_hi incr */
     uint32_t            bw_probe_up_cnt;
     /* packets (S)ACKed since inflight_hi incr */

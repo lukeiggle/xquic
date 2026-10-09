@@ -164,6 +164,9 @@ xqc_bbr2_init(void *cong_ctl, xqc_sample_t *sampler, xqc_cc_params_t cc_params)
     bbr2->srtt_in_current_round = XQC_BBR2_INF_RTT;
     bbr2->srtt_in_last_round = XQC_BBR2_INF_RTT;
 #endif
+    if (cc_params.cc_optimization_flags & XQC_BBR2_FLAG_INFLIGHT_HI_FLOOR) {
+        bbr2->inflight_hi_floor_on = 1;
+    }
 
     bbr2->min_rtt = sampler->srtt ? sampler->srtt : XQC_BBR2_INF_RTT;
     bbr2->min_rtt_stamp = now;
@@ -360,6 +363,7 @@ static void
 xqc_bbr2_handle_inflight_too_high(xqc_bbr2_t *bbr2, xqc_sample_t *sampler)
 {
     double beta = xqc_bbr2_inflight_lo_beta;
+    uint32_t prior_inflight_hi = bbr2->inflight_hi;
     bbr2->prev_probe_too_high = 1;
     bbr2->bw_probe_samples = 0; /* only react once per probe */
     /*
@@ -371,6 +375,19 @@ xqc_bbr2_handle_inflight_too_high(xqc_bbr2_t *bbr2, xqc_sample_t *sampler)
     if (!sampler->is_app_limited) {
         bbr2->inflight_hi = xqc_max(sampler->tx_in_flight,
             xqc_bbr2_target_inflight(bbr2) * (1.0 - beta));
+        /*
+         * The term above is bounded by target_inflight, which follows the
+         * bandwidth estimate. Once the estimate is low, a loss at an
+         * in-flight level far below inflight_hi would otherwise set
+         * inflight_hi to that level in one step. Keep at least (1 - beta)
+         * of the inflight_hi this probe ran against.
+         */
+        if (bbr2->inflight_hi_floor_on
+            && prior_inflight_hi != XQC_BBR2_UNSIGNED_INF)
+        {
+            bbr2->inflight_hi = xqc_max(bbr2->inflight_hi,
+                (uint32_t)(prior_inflight_hi * (1.0 - beta)));
+        }
     }
     if (bbr2->mode == BBR2_PROBE_BW && bbr2->cycle_idx == BBR2_BW_PROBE_UP) {
         xqc_bbr2_enter_probe_down(bbr2, sampler);

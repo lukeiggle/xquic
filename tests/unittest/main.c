@@ -577,6 +577,8 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_bbr2_fc_advance_guarded_down", xqc_test_bbr2_fc_advance_guarded_down)
         || !CU_add_test(pSuite, "xqc_test_bbr2_fc_advance_guarded_cruise", xqc_test_bbr2_fc_advance_guarded_cruise)
         || !CU_add_test(pSuite, "xqc_test_bbr2_fc_advance_guarded_new_cycle", xqc_test_bbr2_fc_advance_guarded_new_cycle)
+        || !CU_add_test(pSuite, "xqc_test_bbr2_inflight_hi_cut_unfloored", xqc_test_bbr2_inflight_hi_cut_unfloored)
+        || !CU_add_test(pSuite, "xqc_test_bbr2_inflight_hi_cut_floored", xqc_test_bbr2_inflight_hi_cut_floored)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

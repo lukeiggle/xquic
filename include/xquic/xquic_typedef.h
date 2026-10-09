@@ -178,6 +178,23 @@ typedef enum {
      */
     XQC_BBR2_FLAG_FC_ADVANCE_GUARDED = 0x4,
 #endif
+    /*
+     * When a loss rate above the threshold is seen on samples from a bandwidth
+     * probe, inflight_hi is set to max(tx_in_flight, 0.7 * target_inflight),
+     * as in BBRv2. target_inflight comes from the bandwidth estimate, so once
+     * the estimate is low, a loss at an in-flight level far below inflight_hi
+     * lowers inflight_hi to that level in one step, and the cwnd it caps then
+     * keeps the samples, and the estimate, at that level. With this flag the
+     * cut also keeps at least 0.7 * the inflight_hi in force before it: one
+     * probe can lower inflight_hi by at most 30%, the same multiplicative
+     * decrease BBRv2 applies to its other bounds. The cost is a slower
+     * reaction to a real fall in path capacity that shows up as loss well
+     * below inflight_hi: it takes one probe per 30% step to reach the new
+     * level, and until then probes may overshoot the path more than they
+     * would without the flag. bw_lo and inflight_lo still respond to loss in
+     * every round outside of probing.
+     */
+    XQC_BBR2_FLAG_INFLIGHT_HI_FLOOR = 0x8,
 } xqc_bbr2_optimization_flag_t;
 
 #define XQC_EXPORT_PUBLIC_API   __attribute__((visibility("default")))

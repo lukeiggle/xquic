@@ -281,3 +281,88 @@ xqc_test_bbr2_fc_advance_guarded_new_cycle(void)
 
     rig_teardown(&rig);
 }
+
+/*
+ * inflight_hi. The rig is in PROBE_UP on samples from a bandwidth probe,
+ * with an estimate low enough that 0.7 * target_inflight (67500 * 0.7 here)
+ * is below the in-flight level of the lossy sample.
+ */
+#define RIG_LOW_BW        3375000
+#define RIG_CEILING       (400 * XQC_MSS)
+/* 1 - xqc_bbr2_inflight_lo_beta, computed as the controller does (beta is
+ * a float there). */
+#define RIG_BETA_KEEP     (1.0 - (double)0.3f)
+
+static void
+rig_setup_probe_up(bbr2_rig_t *rig, uint32_t flags, uint32_t inflight_hi)
+{
+    rig_setup(rig, flags, BBR2_BW_PROBE_UP);
+    rig->bbr2.bw_hi[0] = RIG_LOW_BW;
+    rig->bbr2.bw_probe_samples = 1;
+    rig->bbr2.inflight_hi = inflight_hi;
+}
+
+static void
+loss_ack(bbr2_rig_t *rig, uint32_t inflight_pkts, uint32_t lost_pkts,
+    int app_limited)
+{
+    rig_ack_t a = {
+        .app_limited = app_limited,
+        .bw = 3000000,
+        .prior_inflight = inflight_pkts * XQC_MSS,
+        .tx_in_flight = (uint64_t)inflight_pkts * XQC_MSS,
+        .lost_pkts = lost_pkts,
+    };
+    rig_ack(rig, &a);
+}
+
+void
+xqc_test_bbr2_inflight_hi_cut_unfloored(void)
+{
+    bbr2_rig_t rig;
+    rig_setup_probe_up(&rig, 0, RIG_CEILING);
+
+    /* 2 of 85 packets lost is above the 2% threshold. */
+    loss_ack(&rig, 85, 2, 0);
+    CU_ASSERT_EQUAL(rig.bbr2.cycle_idx, BBR2_BW_PROBE_DOWN);
+    CU_ASSERT_EQUAL(rig.bbr2.inflight_hi, 85 * XQC_MSS);
+
+    rig_teardown(&rig);
+}
+
+void
+xqc_test_bbr2_inflight_hi_cut_floored(void)
+{
+    bbr2_rig_t rig;
+    const uint32_t flag = XQC_BBR2_FLAG_INFLIGHT_HI_FLOOR;
+    const uint32_t floor = (uint32_t)(RIG_CEILING * RIG_BETA_KEEP);
+
+    /* The same loss far below inflight_hi takes off at most 30%. */
+    rig_setup_probe_up(&rig, flag, RIG_CEILING);
+    loss_ack(&rig, 85, 2, 0);
+    CU_ASSERT_EQUAL(rig.bbr2.cycle_idx, BBR2_BW_PROBE_DOWN);
+    CU_ASSERT_EQUAL(rig.bbr2.inflight_hi, floor);
+    CU_ASSERT(rig.bbr2.inflight_hi > 85 * XQC_MSS);
+    rig_teardown(&rig);
+
+    /* A loss above the floor still sets inflight_hi to its in-flight level. */
+    rig_setup_probe_up(&rig, flag, RIG_CEILING);
+    loss_ack(&rig, 380, 8, 0);
+    CU_ASSERT_EQUAL(rig.bbr2.cycle_idx, BBR2_BW_PROBE_DOWN);
+    CU_ASSERT_EQUAL(rig.bbr2.inflight_hi, 380 * XQC_MSS);
+    rig_teardown(&rig);
+
+    /* No inflight_hi yet: there is nothing to keep. */
+    rig_setup_probe_up(&rig, flag, 0xffffffffU);
+    loss_ack(&rig, 85, 2, 0);
+    CU_ASSERT_EQUAL(rig.bbr2.cycle_idx, BBR2_BW_PROBE_DOWN);
+    CU_ASSERT_EQUAL(rig.bbr2.inflight_hi, 85 * XQC_MSS);
+    rig_teardown(&rig);
+
+    /* An app-limited sample does not move inflight_hi. */
+    rig_setup_probe_up(&rig, flag, RIG_CEILING);
+    loss_ack(&rig, 85, 2, 1);
+    CU_ASSERT_EQUAL(rig.bbr2.cycle_idx, BBR2_BW_PROBE_DOWN);
+    CU_ASSERT_EQUAL(rig.bbr2.inflight_hi, RIG_CEILING);
+    rig_teardown(&rig);
+}
