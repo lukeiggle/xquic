@@ -194,6 +194,10 @@ typedef struct xqc_bbr2_s {
     uint32_t                rtt_compensation_thresh;
     uint8_t                 rtt_compensation_on;
     uint8_t                 fast_convergence_on;
+    /* XQC_BBR2_FLAG_FC_ADVANCE_GUARDED */
+    uint8_t                 fc_advance_guarded;
+    /* fast convergence advanced bw_hi in this probing cycle */
+    uint8_t                 fc_advanced_in_cycle;
     xqc_usec_t              srtt_in_last_round;
     xqc_usec_t              srtt_in_current_round;
     uint32_t                bw_before_probe;

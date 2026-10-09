@@ -58,6 +58,7 @@
 #include "xqc_vn_test.h"
 #include "xqc_frame_type_bit_test.h"
 #include "xqc_applimit_test.h"
+#include "xqc_bbr2_guard_test.h"
 
 static int
 xqc_init_suite(void)
@@ -572,6 +573,10 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_applimit_lingering_ack_only", xqc_test_applimit_lingering_ack_only)
         || !CU_add_test(pSuite, "xqc_test_applimit_marker_value", xqc_test_applimit_marker_value)
         || !CU_add_test(pSuite, "xqc_test_applimit_pacer_untouched", xqc_test_applimit_pacer_untouched)
+        || !CU_add_test(pSuite, "xqc_test_bbr2_fc_advance_unguarded", xqc_test_bbr2_fc_advance_unguarded)
+        || !CU_add_test(pSuite, "xqc_test_bbr2_fc_advance_guarded_down", xqc_test_bbr2_fc_advance_guarded_down)
+        || !CU_add_test(pSuite, "xqc_test_bbr2_fc_advance_guarded_cruise", xqc_test_bbr2_fc_advance_guarded_cruise)
+        || !CU_add_test(pSuite, "xqc_test_bbr2_fc_advance_guarded_new_cycle", xqc_test_bbr2_fc_advance_guarded_new_cycle)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

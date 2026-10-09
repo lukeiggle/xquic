@@ -158,6 +158,9 @@ xqc_bbr2_init(void *cong_ctl, xqc_sample_t *sampler, xqc_cc_params_t cc_params)
     if (cc_params.cc_optimization_flags & XQC_BBR2_FLAG_FAST_CONVERGENCE) {
         bbr2->fast_convergence_on = 1;
     }
+    if (cc_params.cc_optimization_flags & XQC_BBR2_FLAG_FC_ADVANCE_GUARDED) {
+        bbr2->fc_advance_guarded = 1;
+    }
     bbr2->srtt_in_current_round = XQC_BBR2_INF_RTT;
     bbr2->srtt_in_last_round = XQC_BBR2_INF_RTT;
 #endif
@@ -280,6 +283,38 @@ xqc_bbr2_advance_bw_hi_filter(xqc_bbr2_t *bbr2)
     bbr2->bw_hi[0] = bbr2->bw_hi[1];
     bbr2->bw_hi[1] = 0;
 }
+
+#if XQC_BBR2_PLUS_ENABLED
+/*
+ * Fast convergence advances the bw_hi filter when the per-round srtt rises
+ * by more than xqc_bbr2_fast_convergence_rtt_factor, so that bandwidth taken
+ * by a competing flow is forgotten sooner than at the end of the next probe.
+ * The comparison holds on every ACK of a round once the srtt has risen, and
+ * the advance promotes whatever bw_hi[1] has collected, so a delay spike can
+ * promote a sample taken during the spike, and later ACKs repeat the advance
+ * for as long as the srtt stays raised.
+ *
+ * With fc_advance_guarded the advance is held to the conditions of the
+ * end-of-probe advance in xqc_bbr2_adapt_upper_bounds() (a round start, and
+ * an ACK whose sample is not app-limited) and to one advance per bandwidth
+ * probing cycle, which starts in xqc_bbr2_enter_probe_down(). A comparison
+ * that finds bw_hi[1] empty changes nothing and does not count.
+ */
+static bool
+xqc_bbr2_fast_convergence_advance(xqc_bbr2_t *bbr2, xqc_sample_t *sampler)
+{
+    if (bbr2->fc_advance_guarded) {
+        if (!bbr2->round_start || sampler->is_app_limited
+            || bbr2->fc_advanced_in_cycle || !bbr2->bw_hi[1])
+        {
+            return FALSE;
+        }
+        bbr2->fc_advanced_in_cycle = 1;
+    }
+    xqc_bbr2_advance_bw_hi_filter(bbr2);
+    return TRUE;
+}
+#endif
 
 static void 
 xqc_bbr2_probe_inflight_hi_upward(xqc_bbr2_t *bbr2, xqc_sample_t *sampler)
@@ -601,8 +636,9 @@ xqc_bbr2_update_cycle_phase(xqc_bbr2_t *bbr2, xqc_sample_t *sampler)
                                         bbr2->srtt_in_last_round;
                 xqc_log(sampler->send_ctl->ctl_conn->log, XQC_LOG_DEBUG, 
                             "|BBRv2 Plus|rtt_thresh %ui|", rtt_thresh);
-                if (bbr2->srtt_in_current_round > rtt_thresh) {
-                    xqc_bbr2_advance_bw_hi_filter(bbr2);
+                if (bbr2->srtt_in_current_round > rtt_thresh
+                    && xqc_bbr2_fast_convergence_advance(bbr2, sampler))
+                {
                     xqc_log(sampler->send_ctl->ctl_conn->log, XQC_LOG_DEBUG, 
                             "|BBRv2 Plus|advanced bw hi filter|");
                 }
@@ -753,7 +789,7 @@ xqc_bbr2_update_cycle_phase(xqc_bbr2_t *bbr2, xqc_sample_t *sampler)
                         "|BBRv2 Plus|State probe down| rtt_thresh %ui|",
                         rtt_thresh);
                 if (bbr2->srtt_in_current_round > rtt_thresh) {
-                    xqc_bbr2_advance_bw_hi_filter(bbr2);
+                    xqc_bbr2_fast_convergence_advance(bbr2, sampler);
                 }
             }
         }
@@ -902,6 +938,9 @@ xqc_bbr2_enter_probe_down(xqc_bbr2_t *bbr2, xqc_sample_t *sampler)
 {
     bbr2->mode = BBR2_PROBE_BW;
     xqc_bbr2_reset_congestion_signals((void *)bbr2);
+#if XQC_BBR2_PLUS_ENABLED
+    bbr2->fc_advanced_in_cycle = 0;
+#endif
     bbr2->bw_probe_up_cnt = XQC_BBR2_UNSIGNED_INF;
     xqc_bbr2_pick_probe_wait(bbr2);
     bbr2->cycle_start_stamp = sampler->now; /* start wall clock */

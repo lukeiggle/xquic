@@ -167,6 +167,16 @@ typedef enum {
 #if XQC_BBR2_PLUS_ENABLED
     XQC_BBR2_FLAG_RTTVAR_COMPENSATION = 0x01,
     XQC_BBR2_FLAG_FAST_CONVERGENCE = 0x2,
+    /*
+     * With XQC_BBR2_FLAG_FAST_CONVERGENCE: the bw_hi filter advance that
+     * fast convergence makes on a per-round srtt increase is taken only at
+     * the start of a round on an ACK whose sample is not app-limited (the
+     * conditions of the end-of-probe advance), and at most once per bandwidth
+     * probing cycle. Without it the advance may be taken on any ACK, any
+     * number of times per cycle, and can promote a sample taken while the
+     * path was app-limited or during a transient delay spike.
+     */
+    XQC_BBR2_FLAG_FC_ADVANCE_GUARDED = 0x4,
 #endif
 } xqc_bbr2_optimization_flag_t;
 
