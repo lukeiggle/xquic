@@ -1896,6 +1896,42 @@ typedef struct xqc_conn_settings_s {
      * setting and keeps reading into the blocked-buffer list. That path has
      * its own bound, max_blocked_buf_per_stream.
      *
+     * SMALL FRAMES MAKE THE CAP BEST-EFFORT. While paused, every unread
+     * STREAM frame is held as its own node. The transport stops accepting
+     * frames for a stream holding XQC_MAX_STREAM_FRAME_BUFFERED_COUNT (8192)
+     * nodes that average under XQC_MIN_STREAM_BUFFERED_BYTES_PER_FRAME (256)
+     * bytes, or XQC_MAX_STREAM_FRAME_BUFFERED_COUNT_HARD (32768) nodes of any
+     * size, or max_stream_frame_buffered_cnt nodes when that is set. It drops
+     * the packet that carried a refused frame without acknowledging it, so
+     * the peer retransmits. A paused stream does not drain, so a peer that
+     * writes in small chunks inside the stream window would have its packets
+     * dropped, and would register them as lost, for as long as the pause
+     * lasted. To prevent that, a frame guard reads a paused request anyway
+     * while its queue holds more than half of the limit for frames of any
+     * size, or more than a quarter of the limit for frames averaging under
+     * 256 bytes (16384 and 2048 nodes; half and a quarter of
+     * max_stream_frame_buffered_cnt when that is set), until the queue is
+     * back under; the pause stays latched and release still needs the drain
+     * described above. The rest of each limit is headroom for the frames
+     * that arrive between two read steps. The bytes read this way go to the
+     * body buffer past this value.
+     *
+     * The guard is reachable whenever the stream receive window (after any
+     * growth up to XQC_MAX_RECV_WINDOW, 16 MiB) exceeds 16384 times the
+     * average frame the peer sends, or 2048 times it for frames averaging
+     * under 256 bytes -- not only for small writers: each HTTP/3 DATA frame
+     * header is sent as a STREAM frame of its own, so every body write costs
+     * at least two, and a peer writing about one full-size packet (some
+     * 1.35 KB of stream data) at a time averages under 700 bytes per frame
+     * and reaches it at windows above about 10.5 MiB. Reading back under the
+     * guard grants no stream credit while the unread remainder is at least
+     * half the window, so the overshoot is then bounded by about one window.
+     * Only where the window exceeds twice the guard (32768 times the average
+     * frame, or 4096 times it for frames averaging under 256 bytes) does
+     * that read grant credit, and a peer that keeps sending such frames to
+     * an application that does not drain can then grow the buffer beyond any
+     * fixed bound.
+     *
      * CLOSING A PAUSED REQUEST. xqc_h3_request_close() on a paused request
      * frees its unread body at once. If the peer has already sent the whole
      * body, the transport data still unread is consumed and dropped too, so
@@ -1904,7 +1940,8 @@ typedef struct xqc_conn_settings_s {
      *
      * Per-request, not per-connection. The worst case a single request can
      * hold in HEAP is therefore this value, plus one XQC_DATA_BUF_SIZE_4K of
-     * overshoot, plus max_blocked_buf_per_stream; and the aggregate bound is
+     * overshoot, plus max_blocked_buf_per_stream, for a peer that does not
+     * send small frames (see above); and the aggregate bound is
      * that sum times the number of concurrently backpressured requests. Size
      * it with that product in mind, and with the connection-window product
      * above -- they are separate limits and either can bind first.

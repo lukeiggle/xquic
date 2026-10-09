@@ -84,13 +84,16 @@ typedef enum {
     /* XQC_HTTP3_STREAM_FLAG_RECV_PAUSED indicates that the request's
        unconsumed body buffer reached conn_settings.h3_recv_body_buf_max, so
        the stream must not read further transport data until the application
-       drains below half that value. Latched (not recomputed per read) so the
-       hysteresis gap between the two watermarks is honoured. Only ever set
-       while h3_recv_body_buf_max is non-zero, and released by the next
-       xqc_h3_request_recv_body() if that setting has since become 0, or by
-       xqc_h3_stream_close(), which discards the unread body. */
+       drains below half that value, except as
+       xqc_h3_stream_recv_frames_over_guard() requires. Latched (not
+       recomputed per read) so the hysteresis gap between the two watermarks
+       is honoured. Only ever set while h3_recv_body_buf_max is non-zero,
+       and released by the next xqc_h3_request_recv_body() if that setting
+       has since become 0, or by xqc_h3_stream_close(), which discards the
+       unread body. */
     XQC_HTTP3_STREAM_FLAG_RECV_PAUSED = 0x4000,
 } xqc_h3_stream_flag;
+
 
 typedef struct xqc_h3_stream_pctx_s {
     /* parsing context for uni-stream type */
@@ -304,5 +307,21 @@ ssize_t xqc_h3_stream_process_control(xqc_h3_stream_t *h3s, unsigned char *data,
 
 ssize_t xqc_h3_stream_process_request(xqc_h3_stream_t *h3s, unsigned char *data,
     size_t data_len, xqc_bool_t fin_flag);
+
+/* A paused request leaves its in-order STREAM frames unread in the transport
+ * receive queue, one node each. xqc_insert_stream_frame() refuses a frame
+ * once the stream holds XQC_MAX_STREAM_FRAME_BUFFERED_COUNT nodes averaging
+ * under XQC_MIN_STREAM_BUFFERED_BYTES_PER_FRAME bytes, or
+ * XQC_MAX_STREAM_FRAME_BUFFERED_COUNT_HARD nodes of any size (both replaced
+ * by conn_settings.max_stream_frame_buffered_cnt when that is set), and drops
+ * the packet that carried it unacknowledged. Nothing drains a paused stream,
+ * so a peer writing in small chunks could reach a limit inside an ordinary
+ * stream window and then have its packets dropped for as long as the pause
+ * lasted. Returns whether the queue is past half of the hard limit, or past a
+ * quarter of the sparse-fragment limit while its frames average under
+ * XQC_MIN_STREAM_BUFFERED_BYTES_PER_FRAME; the rest of each limit covers the
+ * frames that arrive between two read steps, which a peer packing many small
+ * STREAM frames into each packet makes numerous. */
+xqc_bool_t xqc_h3_stream_recv_frames_over_guard(const xqc_stream_t *stream);
 
 #endif

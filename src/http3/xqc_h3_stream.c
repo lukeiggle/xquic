@@ -1968,6 +1968,31 @@ xqc_h3_stream_recv_paused(xqc_h3_stream_t *h3s)
            && h3s->stream->stream_state_recv < XQC_RECV_STREAM_ST_RESET_RECVD;
 }
 
+/* Over the guard the pause gives way: the stream is read until the queue is
+ * back under it. The latch itself is left set, so the request is paused
+ * again as soon as the queue allows and release still waits for the
+ * application to drain. The two tiers mirror xqc_insert_stream_frame(), so a
+ * peer sending frames dense enough for the transport to keep accepting them
+ * is not read past the high-water. The sparse tier gives way at a quarter of
+ * its limit: frames that small arrive many to a packet, so the batch that
+ * lands between two read steps can be large. */
+xqc_bool_t
+xqc_h3_stream_recv_frames_over_guard(const xqc_stream_t *stream)
+{
+    uint64_t cfg = stream->stream_conn->conn_settings.max_stream_frame_buffered_cnt;
+    uint64_t sparse_cap = cfg > 0 ? cfg : XQC_MAX_STREAM_FRAME_BUFFERED_COUNT;
+    uint64_t hard_cap = cfg > 0 ? cfg : XQC_MAX_STREAM_FRAME_BUFFERED_COUNT_HARD;
+    uint64_t count = stream->stream_data_in.buffered_frame_count;
+
+    if (count > hard_cap / 2) {
+        return XQC_TRUE;
+    }
+
+    return count > sparse_cap / 4
+           && stream->stream_data_in.buffered_data_bytes
+              < count * XQC_MIN_STREAM_BUFFERED_BYTES_PER_FRAME;
+}
+
 
 xqc_int_t
 xqc_h3_stream_process_data(xqc_stream_t *stream, xqc_h3_stream_t *h3s, xqc_bool_t *fin)
@@ -1993,8 +2018,15 @@ xqc_h3_stream_process_data(xqc_stream_t *stream, xqc_h3_stream_t *h3s, xqc_bool_
      * as the pause lasts. xqc_h3_request_recv_body() puts it back when the
      * application drains below the low-water. */
     if (xqc_h3_stream_recv_paused(h3s)) {
-        xqc_stream_shutdown_read(stream);
-        return XQC_OK;
+        if (!xqc_h3_stream_recv_frames_over_guard(stream)) {
+            xqc_stream_shutdown_read(stream);
+            return XQC_OK;
+        }
+
+        xqc_log(h3c->log, XQC_LOG_DEBUG, "|recv pause yields to frame guard|stream_id:%ui"
+                "|frames:%ui|bytes:%ui|body_buf_bytes:%uz|", h3s->stream_id,
+                stream->stream_data_in.buffered_frame_count,
+                stream->stream_data_in.buffered_data_bytes, h3s->h3r->body_buf_bytes);
     }
 
     do {
@@ -2036,8 +2068,11 @@ xqc_h3_stream_process_data(xqc_stream_t *stream, xqc_h3_stream_t *h3s, xqc_bool_
 
         /* The process_in above may have just crossed the high-water. Stop
          * before the next read so overshoot is bounded by one 4 KiB transport
-         * read rather than by the whole loop. */
-        if (xqc_h3_stream_recv_paused(h3s)) {
+         * read rather than by the whole loop, except while the frame guard
+         * holds the pause open. */
+        if (xqc_h3_stream_recv_paused(h3s)
+            && !xqc_h3_stream_recv_frames_over_guard(stream))
+        {
             xqc_stream_shutdown_read(stream);
             break;
         }

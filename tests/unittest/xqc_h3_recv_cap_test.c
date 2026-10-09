@@ -11,6 +11,7 @@
 #include "src/transport/xqc_stream.h"
 #include "src/transport/xqc_frame.h"
 #include "src/http3/xqc_h3_defs.h"
+#include "src/common/utils/vint/xqc_variable_len_int.h"
 #include "xqc_h3_test.h"
 #include "xqc_test_helpers.h"
 #include "xqc_h3_recv_cap_test.h"
@@ -960,4 +961,321 @@ xqc_test_h3_recv_close_paused_after_fin(void)
     if (conn->alpn) {
         xqc_free(conn->alpn);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* A paused request fed in many STREAM frames.                         */
+/* ------------------------------------------------------------------ */
+
+#define FRAME_GUARD_MAX_CHUNK 1024  /* largest STREAM frame payload used here */
+#define FRAME_GUARD_BATCH   100     /* frames between read steps, one per packet */
+#define FRAME_GUARD_HDR     5       /* DATA type + 4-byte length varint */
+
+/* Where the guard gives way, against each transport reassembly limit
+ * (xqc_insert_stream_frame): a quarter of the sparse-fragment limit, so
+ * three quarters are left for the small frames that arrive between two read
+ * steps, and half of the hard limit. */
+#define FRAME_GUARD_SPARSE  (XQC_MAX_STREAM_FRAME_BUFFERED_COUNT / 4)
+#define FRAME_GUARD_HARD    (XQC_MAX_STREAM_FRAME_BUFFERED_COUNT_HARD / 2)
+
+/* Shape of the stream the current case feeds: frame_guard_frames frames of
+ * frame_guard_chunk bytes each, carrying one DATA frame. */
+static size_t frame_guard_chunk;
+static size_t frame_guard_frames;
+static int frame_guard_read_notifies;
+
+static int
+frame_guard_ignore_body(xqc_h3_request_t *h3r, xqc_request_notify_flag_t flag,
+    void *user_data)
+{
+    frame_guard_read_notifies++;
+    return 0;
+}
+
+/* Byte `off` of a request stream that carries one DATA frame whose body
+ * fills the rest of the frame_guard_frames * frame_guard_chunk bytes. */
+static unsigned char
+frame_guard_stream_byte(size_t off)
+{
+    size_t body = frame_guard_frames * frame_guard_chunk - FRAME_GUARD_HDR;
+    switch (off) {
+    case 0: return 0x00;                                        /* DATA */
+    case 1: return (unsigned char)(0x80 | ((body >> 24) & 0x3f));
+    case 2: return (unsigned char)((body >> 16) & 0xff);
+    case 3: return (unsigned char)((body >> 8) & 0xff);
+    case 4: return (unsigned char)(body & 0xff);
+    default: return 'g';
+    }
+}
+
+/* Deliver stream bytes [off, off + frame_guard_chunk) as one STREAM frame
+ * in a 1-RTT packet, through the same frame processing an inbound packet
+ * gets, so the transport's per-stream frame limits apply. */
+static xqc_int_t
+frame_guard_deliver(xqc_connection_t *conn, xqc_stream_t *stream, size_t off)
+{
+    unsigned char buf[32 + FRAME_GUARD_MAX_CHUNK];
+    unsigned char *p = buf;
+    size_t i;
+
+    *p++ = 0x0e;                        /* STREAM, OFF and LEN bits set */
+    p = xqc_put_varint(p, stream->stream_id);
+    p = xqc_put_varint(p, off);
+    p = xqc_put_varint(p, frame_guard_chunk);
+    for (i = 0; i < frame_guard_chunk; i++) {
+        *p++ = frame_guard_stream_byte(off + i);
+    }
+
+    xqc_packet_in_t pi;
+    memset(&pi, 0, sizeof(pi));
+    pi.pi_pkt.pkt_type = XQC_PTYPE_SHORT_HEADER;
+    pi.pi_path_id = XQC_INITIAL_PATH_ID;
+    pi.pos = buf;
+    pi.last = p;
+    return xqc_process_frames(conn, &pi);
+}
+
+typedef struct {
+    int     failed_at;              /* frame index refused, or -1 */
+    xqc_int_t failed_ret;
+    uint64_t max_frames_before_read;
+    uint64_t max_frames_after_read;
+    int     reads_while_paused_below_guard;
+    int     reads_while_paused_over_guard;
+} frame_guard_run_t;
+
+/* Feed the whole stream with a read step after every FRAME_GUARD_BATCH
+ * frames, as an engine pass would, while the application reads nothing. */
+static void
+frame_guard_feed(xqc_connection_t *conn, xqc_h3_stream_t *h3s, frame_guard_run_t *run)
+{
+    xqc_stream_t *stream = h3s->stream;
+    size_t i;
+
+    memset(run, 0, sizeof(*run));
+    run->failed_at = -1;
+
+    for (i = 0; i < frame_guard_frames; i++) {
+        xqc_int_t ret = frame_guard_deliver(conn, stream, i * frame_guard_chunk);
+        if (ret != XQC_OK) {
+            run->failed_at = (int)i;
+            run->failed_ret = ret;
+            return;
+        }
+
+        if ((i + 1) % FRAME_GUARD_BATCH != 0 && i + 1 != frame_guard_frames) {
+            continue;
+        }
+
+        uint64_t before = stream->stream_data_in.buffered_frame_count;
+        uint64_t read_off = stream->stream_data_in.next_read_offset;
+        xqc_bool_t paused = (h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED) != 0;
+        xqc_bool_t over = xqc_h3_stream_recv_frames_over_guard(stream);
+
+        xqc_process_read_streams(conn);
+
+        uint64_t after = stream->stream_data_in.buffered_frame_count;
+        run->max_frames_before_read = xqc_max(run->max_frames_before_read, before);
+        run->max_frames_after_read = xqc_max(run->max_frames_after_read, after);
+        if (paused && stream->stream_data_in.next_read_offset > read_off) {
+            if (over) {
+                run->reads_while_paused_over_guard++;
+            } else {
+                run->reads_while_paused_below_guard++;
+            }
+        }
+    }
+}
+
+static xqc_h3_stream_t *
+frame_guard_setup(xqc_connection_t **conn, xqc_h3_conn_t **h3c, uint32_t max,
+    size_t chunk, size_t frames)
+{
+    CU_ASSERT_FATAL(chunk <= FRAME_GUARD_MAX_CHUNK);
+    frame_guard_chunk = chunk;
+    frame_guard_frames = frames;
+
+    xqc_h3_stream_t *h3s = recv_cap_setup(conn, h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+    resume_route_stream_to_h3(h3s);
+
+    frame_guard_read_notifies = 0;
+    (*h3c)->h3_request_callbacks.h3_request_read_notify = frame_guard_ignore_body;
+    (*conn)->conn_settings.h3_recv_body_buf_max = max;
+
+    /* Room for the whole stream, so neither window is what stops the peer:
+     * the case is a chatty peer inside an ordinary window. */
+    (*conn)->conn_flow_ctl.fc_max_data_can_recv = 16 * 1024 * 1024;
+    h3s->stream->stream_flow_ctl.fc_max_stream_data_can_recv = 16 * 1024 * 1024;
+    return h3s;
+}
+
+void
+xqc_test_h3_recv_pause_yields_to_frame_guard(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    frame_guard_run_t run;
+    size_t chunk = 64;
+    size_t frames = 10000;          /* more than XQC_MAX_STREAM_FRAME_BUFFERED_COUNT */
+    size_t total = frames * chunk;
+    size_t body = total - FRAME_GUARD_HDR;
+
+    /* Cap on. The first read latches the pause at the high-water and the
+     * application never drains, so from then on every frame stays in the
+     * transport queue as its own node. Unchecked, the queue would reach the
+     * sparse-fragment limit of 8192 nodes and every packet carrying more of
+     * the stream would be dropped unacknowledged. The pause has to hold while the
+     * queue is below the guard and give way above it, reading just enough
+     * to bring the queue back under. */
+    xqc_h3_stream_t *h3s = frame_guard_setup(&conn, &h3c, 1024, chunk, frames);
+    xqc_stream_t *stream = h3s->stream;
+    frame_guard_feed(conn, h3s, &run);
+
+    CU_ASSERT_EQUAL(run.failed_at, -1);
+    CU_ASSERT_EQUAL(run.failed_ret, XQC_OK);
+    CU_ASSERT_EQUAL(conn->conn_err, 0);
+    CU_ASSERT_FALSE(conn->conn_flag & XQC_CONN_FLAG_ERROR);
+    CU_ASSERT_TRUE(run.max_frames_before_read <= FRAME_GUARD_SPARSE + FRAME_GUARD_BATCH);
+    CU_ASSERT_TRUE(run.max_frames_after_read <= FRAME_GUARD_SPARSE);
+    CU_ASSERT_EQUAL(run.reads_while_paused_below_guard, 0);
+    CU_ASSERT_TRUE(run.reads_while_paused_over_guard > 0);
+    /* The margin between read steps: a read step leaves at most a quarter
+     * of the transport's limit queued, so the frames that arrive before the
+     * next one have three quarters of it to fill. */
+    CU_ASSERT_TRUE(run.max_frames_after_read
+                   <= XQC_MAX_STREAM_FRAME_BUFFERED_COUNT / 4);
+
+    /* Still latched: the guard reads past the high-water but does not end
+     * the pause, so release still waits for the application to drain. Every
+     * byte read is in the body buffer and accounted on both counters. */
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_TRUE(frame_guard_read_notifies > 0);
+    CU_ASSERT_TRUE(stream->stream_data_in.next_read_offset > XQC_DATA_BUF_SIZE_4K);
+    CU_ASSERT_TRUE(total - stream->stream_data_in.next_read_offset
+                   <= FRAME_GUARD_SPARSE * chunk);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes,
+                    stream->stream_data_in.next_read_offset - FRAME_GUARD_HDR);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, h3s->h3r->body_buf_bytes);
+    CU_ASSERT_EQUAL(h3s->h3r->body_recvd, 0);
+
+    /* The application drains. Release and the reads that follow deliver the
+     * rest, and the counters return to zero with every body byte delivered
+     * exactly once. */
+    unsigned char out[XQC_DATA_BUF_SIZE_4K];
+    size_t drained = 0;
+    int rounds = 0;
+    while (drained < body && rounds++ < 10000) {
+        uint8_t fin = 0;
+        ssize_t n;
+        while ((n = xqc_h3_request_recv_body(h3s->h3r, out, sizeof(out), &fin)) > 0) {
+            drained += (size_t)n;
+        }
+        CU_ASSERT_EQUAL_FATAL(n, -XQC_EAGAIN);
+        xqc_process_read_streams(conn);
+    }
+    CU_ASSERT_EQUAL(drained, body);
+    CU_ASSERT_EQUAL(h3s->h3r->body_recvd, body);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, 0);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 0);
+    CU_ASSERT_EQUAL(stream->stream_data_in.next_read_offset, total);
+    CU_ASSERT_EQUAL(stream->stream_data_in.buffered_frame_count, 0);
+    CU_ASSERT_FALSE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_EQUAL(conn->conn_err, 0);
+
+    recv_cap_teardown(h3s, h3c, conn);
+
+    /* Control, cap off: never paused, every read step empties the queue,
+     * and the guard has nothing to do. */
+    h3s = frame_guard_setup(&conn, &h3c, 0, chunk, frames);
+    stream = h3s->stream;
+    frame_guard_feed(conn, h3s, &run);
+
+    CU_ASSERT_EQUAL(run.failed_at, -1);
+    CU_ASSERT_EQUAL(conn->conn_err, 0);
+    CU_ASSERT_EQUAL(run.max_frames_before_read, FRAME_GUARD_BATCH);
+    CU_ASSERT_EQUAL(run.max_frames_after_read, 0);
+    CU_ASSERT_EQUAL(run.reads_while_paused_below_guard, 0);
+    CU_ASSERT_EQUAL(run.reads_while_paused_over_guard, 0);
+    CU_ASSERT_FALSE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_EQUAL(stream->stream_data_in.next_read_offset, total);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, body);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, body);
+
+    recv_cap_teardown(h3s, h3c, conn);
+}
+
+void
+xqc_test_h3_recv_frame_guard_follows_transport_limits(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    frame_guard_run_t run;
+    xqc_h3_stream_t *h3s;
+    xqc_stream_t *stream;
+
+    /* Packet-sized frames: 9000 of 1 KiB is past the sparse-fragment node
+     * count but dense enough that the transport keeps accepting them, so
+     * the pause must hold for the whole stream. The high-water is the only
+     * thing read past. */
+    h3s = frame_guard_setup(&conn, &h3c, 1024, 1024, 9000);
+    stream = h3s->stream;
+    frame_guard_feed(conn, h3s, &run);
+
+    CU_ASSERT_EQUAL(run.failed_at, -1);
+    CU_ASSERT_EQUAL(conn->conn_err, 0);
+    CU_ASSERT_EQUAL(run.reads_while_paused_below_guard, 0);
+    CU_ASSERT_EQUAL(run.reads_while_paused_over_guard, 0);
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_TRUE(stream->stream_data_in.next_read_offset <= XQC_DATA_BUF_SIZE_4K);
+    CU_ASSERT_TRUE(stream->stream_data_in.buffered_frame_count
+                   >= 9000 - XQC_DATA_BUF_SIZE_4K / 1024);
+    CU_ASSERT_TRUE(h3s->h3r->body_buf_bytes <= 1024 + XQC_DATA_BUF_SIZE_4K);
+    recv_cap_teardown(h3s, h3c, conn);
+
+    /* Frames dense enough for the sparse tier but small enough that the hard
+     * node limit binds inside the window: the guard gives way at half of
+     * it. */
+    h3s = frame_guard_setup(&conn, &h3c, 1024, 300, FRAME_GUARD_HARD + 1000);
+    stream = h3s->stream;
+    frame_guard_feed(conn, h3s, &run);
+
+    CU_ASSERT_EQUAL(run.failed_at, -1);
+    CU_ASSERT_EQUAL(conn->conn_err, 0);
+    CU_ASSERT_TRUE(run.max_frames_before_read > FRAME_GUARD_SPARSE);
+    CU_ASSERT_TRUE(run.max_frames_after_read <= FRAME_GUARD_HARD);
+    CU_ASSERT_EQUAL(run.reads_while_paused_below_guard, 0);
+    CU_ASSERT_TRUE(run.reads_while_paused_over_guard > 0);
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    recv_cap_teardown(h3s, h3c, conn);
+
+    /* A configured max_stream_frame_buffered_cnt replaces both transport
+     * limits, so the guard sits at half of it for frames of any size... */
+    h3s = frame_guard_setup(&conn, &h3c, 1024, 1024, 2000);
+    stream = h3s->stream;
+    conn->conn_settings.max_stream_frame_buffered_cnt = 1000;
+    frame_guard_feed(conn, h3s, &run);
+
+    CU_ASSERT_EQUAL(run.failed_at, -1);
+    CU_ASSERT_EQUAL(conn->conn_err, 0);
+    CU_ASSERT_TRUE(run.max_frames_before_read > 250);
+    CU_ASSERT_TRUE(run.max_frames_after_read <= 500);
+    CU_ASSERT_EQUAL(run.reads_while_paused_below_guard, 0);
+    CU_ASSERT_TRUE(run.reads_while_paused_over_guard > 0);
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    recv_cap_teardown(h3s, h3c, conn);
+
+    /* ...and at a quarter of it for frames under 256 bytes. */
+    h3s = frame_guard_setup(&conn, &h3c, 1024, 64, 2000);
+    stream = h3s->stream;
+    conn->conn_settings.max_stream_frame_buffered_cnt = 1000;
+    frame_guard_feed(conn, h3s, &run);
+
+    CU_ASSERT_EQUAL(run.failed_at, -1);
+    CU_ASSERT_EQUAL(conn->conn_err, 0);
+    CU_ASSERT_TRUE(run.max_frames_after_read <= 250);
+    CU_ASSERT_EQUAL(run.reads_while_paused_below_guard, 0);
+    CU_ASSERT_TRUE(run.reads_while_paused_over_guard > 0);
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    recv_cap_teardown(h3s, h3c, conn);
 }

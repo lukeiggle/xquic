@@ -104,4 +104,21 @@ void xqc_test_h3_recv_resume_outside_engine_wakes_engine(void);
  * the stream, its frames and its body are held until the connection ends. */
 void xqc_test_h3_recv_close_paused_after_fin(void);
 
+/* A paused request whose peer keeps sending small STREAM frames inside the
+ * stream window. Each unread frame is a node in the transport receive queue,
+ * and the transport stops accepting a stream's frames once it holds
+ * XQC_MAX_STREAM_FRAME_BUFFERED_COUNT nodes this small. The pause holds while
+ * the queue is below a quarter of that and gives way above it, leaving three
+ * quarters for the frames that arrive between read steps, so no frame is
+ * refused and the body is delivered intact. With the cap off nothing is
+ * paused and the guard never acts. */
+void xqc_test_h3_recv_pause_yields_to_frame_guard(void);
+
+/* The guard follows the limit the transport would apply: packet-sized frames
+ * past the sparse-fragment node count leave the pause in place, smaller but
+ * dense frames make it give way at half the hard node limit, and a
+ * configured max_stream_frame_buffered_cnt moves the guard to half of that,
+ * or to a quarter of it for frames under 256 bytes. */
+void xqc_test_h3_recv_frame_guard_follows_transport_limits(void);
+
 #endif /* _XQC_H3_RECV_CAP_TEST_H */
