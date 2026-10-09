@@ -134,4 +134,12 @@ void xqc_test_h3_recv_total_pauses_and_releases(void);
 void xqc_test_h3_recv_total_spares_requests_under_floor(void);
 void xqc_test_h3_recv_total_pause_yields_to_frame_guard(void);
 
+/* Teardown of a held request (its credit on destroy) re-evaluates the
+ * connection-wide pause, so the others are not held by bytes that are gone.
+ * And through the engine's read step: a request the total holds is latched
+ * before its read, still notified of the body it has, and resumed in the
+ * same notify once a drain releases it. */
+void xqc_test_h3_recv_total_cleared_by_destroy(void);
+void xqc_test_h3_recv_total_latches_before_read_in_notify(void);
+
 #endif /* _XQC_H3_RECV_CAP_TEST_H */

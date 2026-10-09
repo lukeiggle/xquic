@@ -600,6 +600,8 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_h3_recv_total_pauses_and_releases", xqc_test_h3_recv_total_pauses_and_releases)
         || !CU_add_test(pSuite, "xqc_test_h3_recv_total_spares_requests_under_floor", xqc_test_h3_recv_total_spares_requests_under_floor)
         || !CU_add_test(pSuite, "xqc_test_h3_recv_total_pause_yields_to_frame_guard", xqc_test_h3_recv_total_pause_yields_to_frame_guard)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_total_cleared_by_destroy", xqc_test_h3_recv_total_cleared_by_destroy)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_total_latches_before_read_in_notify", xqc_test_h3_recv_total_latches_before_read_in_notify)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

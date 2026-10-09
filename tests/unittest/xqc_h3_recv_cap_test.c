@@ -1672,3 +1672,83 @@ xqc_test_h3_recv_total_pause_yields_to_frame_guard(void)
 
     recv_cap_teardown(h3s, h3c, conn);
 }
+
+void
+xqc_test_h3_recv_total_cleared_by_destroy(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *held = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(held);
+    xqc_h3_stream_t *big = recv_cap_add_request(conn, h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(big);
+
+    conn->conn_settings.h3_recv_total_buf_max = 256 * TOTAL_KIB;
+    total_feed_body(big, 300 * TOTAL_KIB);
+    total_feed_body(held, 70 * TOTAL_KIB);
+    CU_ASSERT_TRUE(h3c->flags & XQC_H3_CONN_FLAG_RECV_TOTAL_PAUSED);
+    CU_ASSERT_TRUE(total_paused(held));
+
+    /* The stalled transfer is torn down without ever being drained (a peer
+     * reset, an application close). Its charge leaves the sum below half, so
+     * the connection-wide pause ends there and then, not at some later
+     * drain... */
+    recv_cap_drop_request(big);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 70 * TOTAL_KIB);
+    CU_ASSERT_FALSE(h3c->flags & XQC_H3_CONN_FLAG_RECV_TOTAL_PAUSED);
+
+    /* ...and the request it held, still above the floor, is released by its
+     * next drain. */
+    xqc_stream_shutdown_read(held->stream);
+    total_drain(held, 1);
+    CU_ASSERT_FALSE(total_paused(held));
+    CU_ASSERT_TRUE(held->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+
+    recv_cap_teardown(held, h3c, conn);
+}
+
+void
+xqc_test_h3_recv_total_latches_before_read_in_notify(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *h3s = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(h3s);
+    xqc_h3_stream_t *big = recv_cap_add_request(conn, h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(big);
+    resume_route_stream_to_h3(h3s);
+
+    conn->conn_settings.h3_recv_total_buf_max = 128 * TOTAL_KIB;
+    total_feed_body(h3s, 70 * TOTAL_KIB);
+    total_feed_body(big, 200 * TOTAL_KIB);
+    CU_ASSERT_FALSE(total_paused(h3s));
+
+    /* The engine's read step reaches this request through the real read
+     * notify. It holds more than the floor while the connection is over its
+     * total, so it is latched before anything is read; the application is
+     * still told about the body it holds, and leaves it there. */
+    frame_guard_read_notifies = 0;
+    h3c->h3_request_callbacks.h3_request_read_notify = frame_guard_ignore_body;
+    size_t parked = resume_park_body(h3s, 8 * TOTAL_KIB);
+    xqc_process_read_streams(conn);
+    CU_ASSERT_EQUAL(h3s->stream->stream_data_in.next_read_offset, 0);
+    CU_ASSERT_TRUE(total_paused(h3s));
+    CU_ASSERT_FALSE(h3s->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+    CU_ASSERT_EQUAL(frame_guard_read_notifies, 1);
+
+    /* An application that drains in its notify: a drain to the floor
+     * releases it, and the resume loop in the notify reads the held-back
+     * body within the same read step. */
+    resume_app_t app = {0};
+    h3c->h3_request_callbacks.h3_request_read_notify = resume_drain_all_on_notify;
+    h3s->h3r->user_data = &app;
+    total_drain(h3s, 70 * TOTAL_KIB - XQC_H3_RECV_TOTAL_FLOOR);
+    CU_ASSERT_FALSE(total_paused(h3s));
+    resume_read_step_in_engine_run(conn);
+    CU_ASSERT_EQUAL(h3s->stream->stream_data_in.next_read_offset, parked);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, 0);
+    CU_ASSERT_EQUAL(app.drained, XQC_H3_RECV_TOTAL_FLOOR + 8 * TOTAL_KIB);
+
+    recv_cap_drop_request(big);
+    recv_cap_teardown(h3s, h3c, conn);
+}
