@@ -60,6 +60,11 @@ typedef enum {
     /* is h3 ext enabled ? */
     XQC_H3_CONN_FLAG_EXT_ENABLED = 1 << 8,
 
+    /* h3_recv_buffered_bytes reached conn_settings.h3_recv_total_buf_max and
+       has not yet fallen below half of it. Kept current by
+       xqc_h3_conn_update_recv_total() at every change of the sum. */
+    XQC_H3_CONN_FLAG_RECV_TOTAL_PAUSED = 1 << 9,
+
 } xqc_http3_conn_flag;
 
 typedef struct xqc_h3_conn_s {
@@ -112,6 +117,13 @@ typedef struct xqc_h3_conn_s {
 } xqc_h3_conn_t;
 
 
+/* Unconsumed body a request may hold without being paused by
+ * conn_settings.h3_recv_total_buf_max. Requests at or under it keep reading
+ * while the connection is over its total, so a few large stalled transfers
+ * cannot starve the small ones that share their connection. */
+#define XQC_H3_RECV_TOTAL_FLOOR (64 * 1024)
+
+
 extern const xqc_conn_callbacks_t h3_conn_callbacks;
 
 
@@ -127,6 +139,19 @@ xqc_h3_stream_t *xqc_h3_conn_create_uni_stream(xqc_h3_conn_t *h3c,
  * validate the uni stream creation event
  */
 xqc_int_t xqc_h3_conn_on_uni_stream_created(xqc_h3_conn_t *h3c, uint64_t stype);
+
+/**
+ * Re-evaluate the connection-wide receive pause after h3_recv_buffered_bytes
+ * has changed: set at h3_recv_total_buf_max, cleared below half of it.
+ */
+void xqc_h3_conn_update_recv_total(xqc_h3_conn_t *h3c);
+
+/**
+ * Whether the connection-wide receive pause holds a request that has
+ * body_buf_bytes of unconsumed body: the pause is in force and the request
+ * holds more than XQC_H3_RECV_TOTAL_FLOOR.
+ */
+xqc_bool_t xqc_h3_conn_recv_total_holds(xqc_h3_conn_t *h3c, size_t body_buf_bytes);
 
 /**
  * whether goaway is recved

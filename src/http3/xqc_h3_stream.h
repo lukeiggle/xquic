@@ -82,15 +82,17 @@ typedef enum {
     /* FIN was sent and no data will be sent any more */
     XQC_HTTP3_STREAM_FLAG_FIN_SENT = 0x2000,
     /* XQC_HTTP3_STREAM_FLAG_RECV_PAUSED indicates that the request's
-       unconsumed body buffer reached conn_settings.h3_recv_body_buf_max, so
-       the stream must not read further transport data until the application
-       drains below half that value, except as
+       unconsumed body buffer reached conn_settings.h3_recv_body_buf_max, or
+       that the connection reached conn_settings.h3_recv_total_buf_max while
+       the request held more than XQC_H3_RECV_TOTAL_FLOOR, so the stream must
+       not read further transport data until the application drains it below
+       the low-water of each limit that holds it, except as
        xqc_h3_stream_recv_frames_over_guard() requires. Latched (not
-       recomputed per read) so the hysteresis gap between the two watermarks
-       is honoured. Only ever set while h3_recv_body_buf_max is non-zero,
-       and released by the next xqc_h3_request_recv_body() if that setting
-       has since become 0, or by xqc_h3_stream_close(), which discards the
-       unread body. */
+       recomputed per read) so the hysteresis gap between the watermarks is
+       honoured. Only
+       ever set while one of those settings is non-zero, and released by the
+       next xqc_h3_request_recv_body() if they have since become 0, or by
+       xqc_h3_stream_close(), which discards the unread body. */
     XQC_HTTP3_STREAM_FLAG_RECV_PAUSED = 0x4000,
 } xqc_h3_stream_flag;
 

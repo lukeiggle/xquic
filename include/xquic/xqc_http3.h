@@ -247,8 +247,10 @@ typedef struct xqc_request_stats_s {
      * and NOT yet consumed by the application through
      * xqc_h3_request_recv_body(). A gauge, not a counter: it rises when the
      * peer outruns the reader and falls as the reader catches up. Bounded by
-     * conn_settings.h3_recv_body_buf_max when that is set, unbounded when it
-     * is 0. Distinct from recv_body_size, which is the cumulative total the
+     * conn_settings.h3_recv_body_buf_max when that is set, held by
+     * conn_settings.h3_recv_total_buf_max while the connection is over that
+     * total and this request holds more than 64 KiB, and unbounded when both
+     * are 0. Distinct from recv_body_size, which is the cumulative total the
      * application has already taken.
      *
      * Appended at the end, as every previous addition to this struct has

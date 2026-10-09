@@ -72,6 +72,7 @@ xqc_test_server_set_conn_settings_propagation(void)
     in.max_path_id_grant_max_value = 32; /* direct copy */
     in.defer_send_flush = 1;             /* direct copy */
     in.h3_recv_body_buf_max = 4 * 1024 * 1024; /* direct copy */
+    in.h3_recv_total_buf_max = 64 * 1024 * 1024; /* direct copy */
 
     /* mqvpn_build_conn_settings() runs mqvpn_apply_scheduler() and
      * mqvpn_apply_reinjection() unconditionally, so a server's input always
@@ -115,6 +116,9 @@ xqc_test_server_set_conn_settings_propagation(void)
      * line here would silently leave every server connection buffering
      * unread H3 body without limit regardless of what the caller asked for. */
     CU_ASSERT_EQUAL(e->default_conn_settings.h3_recv_body_buf_max, 4 * 1024 * 1024);
+    /* And for the connection-wide counterpart: without its copy line a
+     * server would bound each request but never the connection. */
+    CU_ASSERT_EQUAL(e->default_conn_settings.h3_recv_total_buf_max, 64 * 1024 * 1024);
 
     /* Scheduler / reinjection: the copy lines these pin are the ones whose
      * silent loss costs the most (default scheduler instead of WLB). */

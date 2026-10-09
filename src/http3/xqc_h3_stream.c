@@ -1196,16 +1196,20 @@ xqc_h3_stream_process_request(xqc_h3_stream_t *h3s, unsigned char *data, size_t 
                 h3s->h3r->body_buf_count++;
                 h3s->h3r->body_buf_bytes += len;
                 h3s->h3c->h3_recv_buffered_bytes += len;
+                xqc_h3_conn_update_recv_total(h3s->h3c);
 
                 /* Latch the receive pause once the request's unconsumed body
-                 * reaches the configured high-water. Done here, at the only
-                 * site where the total grows, rather than in the read loop:
-                 * the loop then merely consults the flag, which keeps the
-                 * decision one-sided and makes the hysteresis testable
-                 * without driving a transport read. 0 = feature off. */
-                if (h3s->h3c->conn->conn_settings.h3_recv_body_buf_max
+                 * reaches the configured high-water, or once the connection
+                 * has reached its total while this request holds more than
+                 * the floor. Done here, at the only site where the totals
+                 * grow, rather than in the read loop: the loop then merely
+                 * consults the flag, which keeps the decision one-sided and
+                 * makes the hysteresis testable without driving a transport
+                 * read. 0 = limit off. */
+                if ((h3s->h3c->conn->conn_settings.h3_recv_body_buf_max
                         && h3s->h3r->body_buf_bytes
                                >= h3s->h3c->conn->conn_settings.h3_recv_body_buf_max)
+                    || xqc_h3_conn_recv_total_holds(h3s->h3c, h3s->h3r->body_buf_bytes))
                 {
                     h3s->flags |= XQC_HTTP3_STREAM_FLAG_RECV_PAUSED;
                 }
@@ -2016,7 +2020,18 @@ xqc_h3_stream_process_data(xqc_stream_t *stream, xqc_h3_stream_t *h3s, xqc_bool_
      * pushes the connection onto the active queue, so a stream left on
      * conn_read_streams would be re-notified on every engine pass for as long
      * as the pause lasts. xqc_h3_request_recv_body() puts it back when the
-     * application drains below the low-water. */
+     * application drains below the low-water.
+     *
+     * The connection-wide pause (conn_settings.h3_recv_total_buf_max) is
+     * reached through another request's read, so a request it holds may not
+     * have latched yet. Latch it here, before reading, exactly as if it had
+     * crossed its own high-water. */
+    if (h3s->type == XQC_H3_STREAM_TYPE_REQUEST && h3s->h3r != NULL
+        && xqc_h3_conn_recv_total_holds(h3c, h3s->h3r->body_buf_bytes))
+    {
+        h3s->flags |= XQC_HTTP3_STREAM_FLAG_RECV_PAUSED;
+    }
+
     if (xqc_h3_stream_recv_paused(h3s)) {
         if (!xqc_h3_stream_recv_frames_over_guard(stream)) {
             xqc_stream_shutdown_read(stream);

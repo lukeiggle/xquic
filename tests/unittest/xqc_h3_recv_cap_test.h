@@ -122,4 +122,16 @@ void xqc_test_h3_recv_pause_yields_to_frame_guard(void);
  * or to a quarter of it for frames under 256 bytes. */
 void xqc_test_h3_recv_frame_guard_follows_transport_limits(void);
 
+/* The connection-wide high-water (h3_recv_total_buf_max). Off by default,
+ * with or without the per-request limit. Reaching it pauses every request
+ * that holds more than XQC_H3_RECV_TOTAL_FLOOR, the one whose read crossed it
+ * at once and the others at their next read step; each is released by its own
+ * drain once the connection is below half the total and its own low-water
+ * holds. Requests at or under the floor are never held by it, and the frame
+ * guard overrides it as it does the per-request pause. */
+void xqc_test_h3_recv_total_off_by_default(void);
+void xqc_test_h3_recv_total_pauses_and_releases(void);
+void xqc_test_h3_recv_total_spares_requests_under_floor(void);
+void xqc_test_h3_recv_total_pause_yields_to_frame_guard(void);
+
 #endif /* _XQC_H3_RECV_CAP_TEST_H */

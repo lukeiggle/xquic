@@ -1374,3 +1374,301 @@ xqc_test_h3_recv_frame_guard_follows_transport_limits(void)
     CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
     recv_cap_teardown(h3s, h3c, conn);
 }
+
+/* ------------------------------------------------------------------ */
+/* The connection-wide high-water (h3_recv_total_buf_max).             */
+/* ------------------------------------------------------------------ */
+
+#define TOTAL_KIB 1024
+
+/* Feed `len` bytes of body as one DATA frame through the real parser, like
+ * feed_data_frame() but with a 4-byte length varint so a single call can
+ * carry the hundreds of KiB these tests need to get past the floor. */
+static void
+total_feed_body(xqc_h3_stream_t *h3s, size_t len)
+{
+    size_t hdr = 5;
+    unsigned char *frame = xqc_malloc(hdr + len);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(frame);
+    frame[0] = 0x00;                                    /* DATA */
+    frame[1] = (unsigned char)(0x80 | ((len >> 24) & 0x3f));
+    frame[2] = (unsigned char)((len >> 16) & 0xff);
+    frame[3] = (unsigned char)((len >> 8) & 0xff);
+    frame[4] = (unsigned char)(len & 0xff);
+    memset(frame + hdr, 't', len);
+    CU_ASSERT_EQUAL(xqc_h3_stream_process_in(h3s, frame, hdr + len, XQC_FALSE), XQC_OK);
+    xqc_free(frame);
+}
+
+/* The application takes exactly `len` bytes of body. */
+static void
+total_drain(xqc_h3_stream_t *h3s, size_t len)
+{
+    unsigned char out[XQC_DATA_BUF_SIZE_4K];
+    uint8_t fin = 0;
+    size_t taken = 0;
+
+    while (taken < len) {
+        size_t want = xqc_min(sizeof(out), len - taken);
+        ssize_t n = xqc_h3_request_recv_body(h3s->h3r, out, want, &fin);
+        CU_ASSERT_FATAL(n > 0);
+        taken += (size_t)n;
+    }
+    CU_ASSERT_EQUAL(taken, len);
+}
+
+static xqc_bool_t
+total_paused(xqc_h3_stream_t *h3s)
+{
+    return (h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED) != 0;
+}
+
+/* Park a DATA frame in the request's transport queue and run its read step.
+ * Returns the number of transport bytes the step consumed. */
+static uint64_t
+total_read_step(xqc_h3_stream_t *h3s, size_t body)
+{
+    xqc_bool_t fin = XQC_FALSE;
+    uint64_t before = h3s->stream->stream_data_in.next_read_offset;
+
+    resume_park_body(h3s, body);
+    CU_ASSERT_EQUAL(xqc_h3_stream_process_data(h3s->stream, h3s, &fin), XQC_OK);
+    return h3s->stream->stream_data_in.next_read_offset - before;
+}
+
+void
+xqc_test_h3_recv_total_off_by_default(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *r1 = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(r1);
+    xqc_h3_stream_t *r2 = recv_cap_add_request(conn, h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(r2);
+    xqc_h3_stream_t *r3 = recv_cap_add_request(conn, h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(r3);
+
+    CU_ASSERT_EQUAL(conn->conn_settings.h3_recv_total_buf_max, 0);
+
+    /* Neither limit set: nothing is paused however much the connection
+     * holds. */
+    total_feed_body(r1, 300 * TOTAL_KIB);
+    total_feed_body(r2, 300 * TOTAL_KIB);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 600 * TOTAL_KIB);
+    CU_ASSERT_FALSE(total_paused(r1));
+    CU_ASSERT_FALSE(total_paused(r2));
+    CU_ASSERT_EQUAL(total_read_step(r1, 8 * TOTAL_KIB), 8 * TOTAL_KIB + 5);
+
+    /* Per-request limit only: a request below its own high-water keeps
+     * reading, whatever its neighbours hold. */
+    conn->conn_settings.h3_recv_body_buf_max = 512 * TOTAL_KIB;
+    total_feed_body(r3, 400 * TOTAL_KIB);
+    CU_ASSERT_FALSE(total_paused(r3));
+    CU_ASSERT_EQUAL(total_read_step(r3, 8 * TOTAL_KIB), 8 * TOTAL_KIB + 5);
+    CU_ASSERT_FALSE(total_paused(r3));
+
+    recv_cap_drop_request(r3);
+    recv_cap_drop_request(r2);
+    recv_cap_teardown(r1, h3c, conn);
+}
+
+void
+xqc_test_h3_recv_total_pauses_and_releases(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *r1 = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(r1);
+    xqc_h3_stream_t *r2 = recv_cap_add_request(conn, h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(r2);
+    xqc_h3_stream_t *r3 = recv_cap_add_request(conn, h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(r3);
+
+    /* Per-request 256 KiB (low-water 128 KiB), connection 2.5 times that:
+     * three requests can reach the total with none at its own high-water. */
+    conn->conn_settings.h3_recv_body_buf_max = 256 * TOTAL_KIB;
+    conn->conn_settings.h3_recv_total_buf_max = 640 * TOTAL_KIB;
+
+    total_feed_body(r1, 200 * TOTAL_KIB);
+    total_feed_body(r2, 200 * TOTAL_KIB);
+    CU_ASSERT_FALSE(total_paused(r1));
+    CU_ASSERT_FALSE(total_paused(r2));
+
+    /* The third request takes the connection to its total. It is the one
+     * reading, and it holds more than the floor, so it pauses at once. */
+    total_feed_body(r3, 240 * TOTAL_KIB);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 640 * TOTAL_KIB);
+    CU_ASSERT_TRUE(total_paused(r3));
+
+    /* The other two hold more than the floor as well: their next read step
+     * reads nothing, pauses them and takes them off the read list, so the
+     * peer is held at their stream windows too. */
+    CU_ASSERT_EQUAL(total_read_step(r1, 8 * TOTAL_KIB), 0);
+    CU_ASSERT_TRUE(total_paused(r1));
+    CU_ASSERT_FALSE(r1->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+    CU_ASSERT_EQUAL(total_read_step(r2, 8 * TOTAL_KIB), 0);
+    CU_ASSERT_TRUE(total_paused(r2));
+    CU_ASSERT_FALSE(r2->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 640 * TOTAL_KIB);
+
+    /* Draining that leaves the connection at or above half its total (320
+     * KiB) releases nobody, even a request below its own low-water. */
+    total_drain(r3, 90 * TOTAL_KIB);    /* r3 150, total 550 */
+    total_drain(r1, 130 * TOTAL_KIB);   /* r1  70, total 420 */
+    total_drain(r2, 100 * TOTAL_KIB);   /* r2 100, total 320 */
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 320 * TOTAL_KIB);
+    CU_ASSERT_TRUE(total_paused(r1));
+    CU_ASSERT_TRUE(total_paused(r2));
+    CU_ASSERT_TRUE(total_paused(r3));
+    CU_ASSERT_FALSE(r1->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+
+    /* Below half: the request whose drain took it there is released and
+     * put back on the read list. */
+    total_drain(r2, 30 * TOTAL_KIB);    /* r2  70, total 290 */
+    CU_ASSERT_FALSE(total_paused(r2));
+    CU_ASSERT_TRUE(r2->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+
+    /* The others are released by their own next drain, and only once their
+     * own low-water holds too: r3 still holds 150 KiB, above 128 KiB. */
+    total_drain(r3, 1);
+    CU_ASSERT_TRUE(total_paused(r3));
+    total_drain(r1, 1);
+    CU_ASSERT_FALSE(total_paused(r1));
+    CU_ASSERT_TRUE(r1->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+    total_drain(r3, 50 * TOTAL_KIB - 1);
+    CU_ASSERT_FALSE(total_paused(r3));
+    CU_ASSERT_TRUE(r3->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+
+    /* Released, r1 reads the body the pause held back. */
+    xqc_bool_t fin = XQC_FALSE;
+    CU_ASSERT_EQUAL(xqc_h3_stream_process_data(r1->stream, r1, &fin), XQC_OK);
+    CU_ASSERT_EQUAL(r1->stream->stream_data_in.next_read_offset, 8 * TOTAL_KIB + 5);
+    CU_ASSERT_FALSE(total_paused(r1));
+
+    /* Hysteresis: back between half and the total, nothing pauses again
+     * until the total itself is reached. */
+    total_feed_body(r1, 150 * TOTAL_KIB);
+    total_feed_body(r2, 150 * TOTAL_KIB);
+    CU_ASSERT_TRUE(h3c->h3_recv_buffered_bytes > 320 * TOTAL_KIB);
+    CU_ASSERT_TRUE(h3c->h3_recv_buffered_bytes < 640 * TOTAL_KIB);
+    CU_ASSERT_FALSE(total_paused(r1));
+    CU_ASSERT_FALSE(total_paused(r2));
+    total_feed_body(r3, 100 * TOTAL_KIB);
+    CU_ASSERT_TRUE(h3c->h3_recv_buffered_bytes >= 640 * TOTAL_KIB);
+    CU_ASSERT_TRUE(r3->h3r->body_buf_bytes < 256 * TOTAL_KIB);
+    CU_ASSERT_TRUE(total_paused(r3));
+
+    recv_cap_drop_request(r3);
+    recv_cap_drop_request(r2);
+    recv_cap_teardown(r1, h3c, conn);
+}
+
+void
+xqc_test_h3_recv_total_spares_requests_under_floor(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    xqc_h3_stream_t *big = recv_cap_setup(&conn, &h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(big);
+    xqc_h3_stream_t *small = recv_cap_add_request(conn, h3c);
+    CU_ASSERT_PTR_NOT_NULL_FATAL(small);
+
+    /* Connection limit only. One stalled transfer takes the connection over
+     * its total and stays there. */
+    conn->conn_settings.h3_recv_total_buf_max = 128 * TOTAL_KIB;
+    total_feed_body(big, 200 * TOTAL_KIB);
+    CU_ASSERT_TRUE(total_paused(big));
+
+    /* A small request keeps reading up to the floor, inclusive. */
+    total_feed_body(small, XQC_H3_RECV_TOTAL_FLOOR - 8 * TOTAL_KIB);
+    CU_ASSERT_FALSE(total_paused(small));
+    CU_ASSERT_EQUAL(total_read_step(small, 8 * TOTAL_KIB - 5), 8 * TOTAL_KIB);
+    CU_ASSERT_EQUAL(small->h3r->body_buf_bytes, XQC_H3_RECV_TOTAL_FLOOR - 5);
+    feed_data_frame(small, 5);
+    CU_ASSERT_EQUAL(small->h3r->body_buf_bytes, XQC_H3_RECV_TOTAL_FLOOR);
+    CU_ASSERT_FALSE(total_paused(small));
+
+    /* Past the floor it is paused like the others... */
+    feed_data_frame(small, 1);
+    CU_ASSERT_TRUE(total_paused(small));
+
+    /* ...and released as soon as it is back at the floor, though the
+     * connection is still over half its total. */
+    xqc_stream_shutdown_read(small->stream);
+    total_drain(small, 1);
+    CU_ASSERT_TRUE(h3c->h3_recv_buffered_bytes >= 64 * TOTAL_KIB);
+    CU_ASSERT_FALSE(total_paused(small));
+    CU_ASSERT_TRUE(small->stream->stream_flag & XQC_STREAM_FLAG_READY_TO_READ);
+
+    /* The large one stays held: it is above the floor and the connection
+     * has not come down to half. */
+    total_drain(big, 100 * TOTAL_KIB);
+    CU_ASSERT_TRUE(total_paused(big));
+
+    recv_cap_drop_request(small);
+    recv_cap_teardown(big, h3c, conn);
+}
+
+void
+xqc_test_h3_recv_total_pause_yields_to_frame_guard(void)
+{
+    xqc_connection_t *conn = NULL;
+    xqc_h3_conn_t *h3c = NULL;
+    frame_guard_run_t run;
+    size_t chunk = 64;
+    size_t frames = 10000;
+    size_t total = frames * chunk;
+    size_t body = total - FRAME_GUARD_HDR;
+
+    /* No per-request limit; the connection limit is what pauses the
+     * request, once it holds 80 KiB (past the floor). The application never
+     * drains, so every frame after that stays in the transport queue, and
+     * more than XQC_MAX_STREAM_FRAME_BUFFERED_COUNT of them are still to
+     * come. The guard must override this pause exactly as it does the
+     * per-request one, or the connection is closed. */
+    xqc_h3_stream_t *h3s = frame_guard_setup(&conn, &h3c, 0, chunk, frames);
+    xqc_stream_t *stream = h3s->stream;
+    conn->conn_settings.h3_recv_total_buf_max = 80 * TOTAL_KIB;
+    CU_ASSERT_TRUE(frames - 80 * TOTAL_KIB / chunk
+                   > XQC_MAX_STREAM_FRAME_BUFFERED_COUNT);
+    frame_guard_feed(conn, h3s, &run);
+
+    CU_ASSERT_EQUAL(run.failed_at, -1);
+    CU_ASSERT_EQUAL(run.failed_ret, XQC_OK);
+    CU_ASSERT_EQUAL(conn->conn_err, 0);
+    CU_ASSERT_FALSE(conn->conn_flag & XQC_CONN_FLAG_ERROR);
+    CU_ASSERT_TRUE(run.max_frames_before_read <= FRAME_GUARD_SPARSE + FRAME_GUARD_BATCH);
+    CU_ASSERT_TRUE(run.max_frames_after_read <= FRAME_GUARD_SPARSE);
+    CU_ASSERT_EQUAL(run.reads_while_paused_below_guard, 0);
+    CU_ASSERT_TRUE(run.reads_while_paused_over_guard > 0);
+
+    CU_ASSERT_TRUE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_TRUE(total - stream->stream_data_in.next_read_offset
+                   <= FRAME_GUARD_SPARSE * chunk);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes,
+                    stream->stream_data_in.next_read_offset - FRAME_GUARD_HDR);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, h3s->h3r->body_buf_bytes);
+
+    /* The application drains: the pause releases and the body is delivered
+     * whole. */
+    unsigned char out[XQC_DATA_BUF_SIZE_4K];
+    size_t drained = 0;
+    int rounds = 0;
+    while (drained < body && rounds++ < 10000) {
+        uint8_t fin = 0;
+        ssize_t n;
+        while ((n = xqc_h3_request_recv_body(h3s->h3r, out, sizeof(out), &fin)) > 0) {
+            drained += (size_t)n;
+        }
+        CU_ASSERT_EQUAL_FATAL(n, -XQC_EAGAIN);
+        xqc_process_read_streams(conn);
+    }
+    CU_ASSERT_EQUAL(drained, body);
+    CU_ASSERT_EQUAL(h3s->h3r->body_buf_bytes, 0);
+    CU_ASSERT_EQUAL(h3c->h3_recv_buffered_bytes, 0);
+    CU_ASSERT_EQUAL(stream->stream_data_in.next_read_offset, total);
+    CU_ASSERT_FALSE(h3s->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED);
+    CU_ASSERT_EQUAL(conn->conn_err, 0);
+
+    recv_cap_teardown(h3s, h3c, conn);
+}

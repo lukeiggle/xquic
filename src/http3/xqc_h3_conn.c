@@ -265,6 +265,45 @@ xqc_h3_conn_get_recv_buffered_bytes(xqc_h3_conn_t *h3c)
     return h3c ? (uint64_t)h3c->h3_recv_buffered_bytes : 0;
 }
 
+/* Hysteresis on the connection sum, the same shape as the per-request
+ * latch: in force from the high-water until the sum falls below half of it.
+ * Called at both sites that move the sum, so the state is never stale when
+ * a read or a drain consults it. An empty connection always clears it, which
+ * keeps a total of 1 (low-water 0) from holding the state for good. */
+void
+xqc_h3_conn_update_recv_total(xqc_h3_conn_t *h3c)
+{
+    uint32_t max = h3c->conn->conn_settings.h3_recv_total_buf_max;
+
+    if (max == 0) {
+        h3c->flags &= ~XQC_H3_CONN_FLAG_RECV_TOTAL_PAUSED;
+
+    } else if (h3c->h3_recv_buffered_bytes >= max) {
+        if (!(h3c->flags & XQC_H3_CONN_FLAG_RECV_TOTAL_PAUSED)) {
+            xqc_log(h3c->log, XQC_LOG_DEBUG, "|recv total paused|buffered:%uz|max:%ud|",
+                    h3c->h3_recv_buffered_bytes, max);
+        }
+        h3c->flags |= XQC_H3_CONN_FLAG_RECV_TOTAL_PAUSED;
+
+    } else if (h3c->h3_recv_buffered_bytes == 0
+               || h3c->h3_recv_buffered_bytes < max / 2)
+    {
+        if (h3c->flags & XQC_H3_CONN_FLAG_RECV_TOTAL_PAUSED) {
+            xqc_log(h3c->log, XQC_LOG_DEBUG, "|recv total released|buffered:%uz|max:%ud|",
+                    h3c->h3_recv_buffered_bytes, max);
+        }
+        h3c->flags &= ~XQC_H3_CONN_FLAG_RECV_TOTAL_PAUSED;
+    }
+}
+
+xqc_bool_t
+xqc_h3_conn_recv_total_holds(xqc_h3_conn_t *h3c, size_t body_buf_bytes)
+{
+    return h3c->conn->conn_settings.h3_recv_total_buf_max != 0
+           && (h3c->flags & XQC_H3_CONN_FLAG_RECV_TOTAL_PAUSED)
+           && body_buf_bytes > XQC_H3_RECV_TOTAL_FLOOR;
+}
+
 
 void *
 xqc_h3_conn_get_ssl(xqc_h3_conn_t *h3_conn)

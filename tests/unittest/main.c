@@ -596,6 +596,10 @@ main(int argc, char *argv[])
         || !CU_add_test(pSuite, "xqc_test_h3_recv_close_paused_then_fin", xqc_test_h3_recv_close_paused_then_fin)
         || !CU_add_test(pSuite, "xqc_test_h3_recv_pause_yields_to_frame_guard", xqc_test_h3_recv_pause_yields_to_frame_guard)
         || !CU_add_test(pSuite, "xqc_test_h3_recv_frame_guard_follows_transport_limits", xqc_test_h3_recv_frame_guard_follows_transport_limits)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_total_off_by_default", xqc_test_h3_recv_total_off_by_default)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_total_pauses_and_releases", xqc_test_h3_recv_total_pauses_and_releases)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_total_spares_requests_under_floor", xqc_test_h3_recv_total_spares_requests_under_floor)
+        || !CU_add_test(pSuite, "xqc_test_h3_recv_total_pause_yields_to_frame_guard", xqc_test_h3_recv_total_pause_yields_to_frame_guard)
         /* ADD TESTS HERE */)
     {
         CU_cleanup_registry();

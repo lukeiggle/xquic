@@ -1949,8 +1949,58 @@ typedef struct xqc_conn_settings_s {
      * that sum times the number of concurrently backpressured requests. Size
      * it with that product in mind, and with the connection-window product
      * above -- they are separate limits and either can bind first.
+     * h3_recv_total_buf_max below bounds the aggregate directly.
      */
     uint32_t                    h3_recv_body_buf_max;
+
+    /**
+     * Per-connection high-water, in bytes, on the same unconsumed HTTP/3
+     * body that h3_recv_body_buf_max bounds per request, summed over all of
+     * the connection's requests (the value that
+     * xqc_h3_conn_get_recv_buffered_bytes() reports). Default: 0 (off) --
+     * requests are then bounded only by
+     * h3_recv_body_buf_max, if that is set. Independent of that setting:
+     * either, both or neither may be set.
+     *
+     * When the connection total reaches this value, every request holding
+     * more than 64 KiB of unconsumed body is paused exactly as if it had
+     * reached its own h3_recv_body_buf_max: its stream stops reading, issues
+     * no further credit, and the peer blocks at the stream window. The
+     * request whose read crossed the total is paused at once, the others
+     * before their next read. Requests holding 64 KiB or less are never
+     * paused by this limit, so a connection held at its total by a few large
+     * stalled transfers still serves its small ones.
+     *
+     * The limit stays in force until the total falls below half this
+     * value. A request it paused is released by the application's
+     * drain call (xqc_h3_request_recv_body()) once the connection is back
+     * under that half, or once the request itself holds 64 KiB or less --
+     * and, in both cases, once the request also meets the low-water of
+     * h3_recv_body_buf_max when that is set. The APPLICATION CONTRACT above
+     * applies unchanged: the release happens in a drain call on the request
+     * itself, not when other requests drain the connection below half.
+     * Every request this limit holds still has more than 64 KiB to drain,
+     * so an application honouring that contract will make that call.
+     *
+     * The frame guard described under h3_recv_body_buf_max overrides this
+     * pause in the same way. Overshoot: a request below the 64 KiB floor
+     * keeps reading, and the read that takes it over the floor, or that
+     * crosses this value, is one XQC_DATA_BUF_SIZE_4K transport read, so
+     * the total can exceed this value by up to 64 KiB plus 4 KiB for each
+     * request receiving at the time, plus any frame-guard reads.
+     *
+     * Sizing: this bounds unconsumed body, not process memory. Each buffered
+     * byte carries allocator overhead, and each request also holds
+     * transport receive queues and the application's own buffers. A
+     * reasonable starting point is half the memory available to the
+     * process beyond its baseline:
+     *
+     *     h3_recv_total_buf_max ~= (memory limit - baseline usage) / 2
+     *
+     * then measure under the expected number of concurrently paused
+     * requests and adjust.
+     */
+    uint32_t                    h3_recv_total_buf_max;
 } xqc_conn_settings_t;
 
 

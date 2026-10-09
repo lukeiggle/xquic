@@ -328,6 +328,11 @@ xqc_server_set_conn_settings(xqc_engine_t *engine, const xqc_conn_settings_t *se
     engine->default_conn_settings.h3_recv_body_buf_max =
         settings->h3_recv_body_buf_max;
 
+    /* And for its connection-wide counterpart: without this line a server
+     * would bound each request but never the connection as a whole. */
+    engine->default_conn_settings.h3_recv_total_buf_max =
+        settings->h3_recv_total_buf_max;
+
 #ifdef XQC_ENABLE_FEC
     engine->default_conn_settings.enable_encode_fec = settings->enable_encode_fec;
     if (engine->default_conn_settings.enable_encode_fec) {

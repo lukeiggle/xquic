@@ -73,6 +73,7 @@ xqc_h3_request_body_buf_credit(xqc_h3_request_t *h3_request, size_t bytes)
 
     h3_request->body_buf_bytes -= bytes;
     h3_request->h3_stream->h3c->h3_recv_buffered_bytes -= bytes;
+    xqc_h3_conn_update_recv_total(h3_request->h3_stream->h3c);
 }
 
 
@@ -846,12 +847,18 @@ xqc_h3_request_recv_body(xqc_h3_request_t *h3_request, unsigned char *recv_buf,
      * "body_buf_bytes < 0", never release, and leave the stream silently
      * stalled for the life of the connection. An empty buffer releases for
      * the same reason at max == 1, where the low-water is also 0: there is
-     * nothing left to drain, so there is nothing left to wait for. */
+     * nothing left to drain, so there is nothing left to wait for.
+     *
+     * The connection-wide limit (h3_recv_total_buf_max) holds the request
+     * as well while it is in force and the request is above the floor; the
+     * credit above has already re-evaluated it. Both must let go. */
     max_recv_buf = h3_request->h3_stream->h3c->conn->conn_settings.h3_recv_body_buf_max;
     if ((h3_request->h3_stream->flags & XQC_HTTP3_STREAM_FLAG_RECV_PAUSED)
         && (max_recv_buf == 0
             || h3_request->body_buf_bytes == 0
-            || h3_request->body_buf_bytes < max_recv_buf / 2))
+            || h3_request->body_buf_bytes < max_recv_buf / 2)
+        && !xqc_h3_conn_recv_total_holds(h3_request->h3_stream->h3c,
+                                         h3_request->body_buf_bytes))
     {
         h3_request->h3_stream->flags &= ~XQC_HTTP3_STREAM_FLAG_RECV_PAUSED;
         if (h3_request->h3_stream->stream) {
