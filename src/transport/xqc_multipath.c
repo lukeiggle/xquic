@@ -963,6 +963,7 @@ xqc_conn_path_metrics_print(xqc_connection_t *conn, xqc_conn_stats_t *stats)
             m->path_pacing_rate     = xqc_send_ctl_get_pacing_rate(path->path_send_ctl);
             m->path_lost_count      = path->path_send_ctl->ctl_lost_count;
             m->path_state           = path->path_state;
+            m->path_cc_mode         = xqc_send_ctl_get_cc_mode(path->path_send_ctl);
             if (path->path_send_ctl->ctl_cong_callback
                 && path->path_send_ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd)
             {

@@ -1849,6 +1849,25 @@ _Static_assert(XQC_PATH_HARD_CAP <= (1ULL << 32) - 1,
 #define XQC_CONN_INFO_LEN        400
 #define XQC_EXTERN_CONN_INFO_LEN 128
 
+/**
+ * @brief the mode of a path's congestion controller, as reported in
+ * xqc_path_metrics_t
+ */
+typedef enum xqc_cc_mode_e {
+    /** the controller has no modes (Cubic, Reno, Copa, ...) */
+    XQC_CC_MODE_NONE        = 0,
+    /** BBR/BBRv2 STARTUP: the bandwidth estimate is the largest rate
+        measured so far and is not aged */
+    XQC_CC_MODE_STARTUP     = 1,
+    /** BBR/BBRv2 DRAIN */
+    XQC_CC_MODE_DRAIN       = 2,
+    /** BBR/BBRv2 PROBE_BW */
+    XQC_CC_MODE_PROBE_BW    = 3,
+    /** BBR/BBRv2 PROBE_RTT. Entered from STARTUP, it returns to STARTUP,
+        and the bandwidth estimate is still the STARTUP maximum */
+    XQC_CC_MODE_PROBE_RTT   = 4,
+} xqc_cc_mode_t;
+
 typedef struct xqc_path_metrics_s {
     uint64_t path_id;
 
@@ -1874,6 +1893,7 @@ typedef struct xqc_path_metrics_s {
     uint64_t path_pacing_rate;     /* pacing rate (bytes/sec) */
     uint32_t path_lost_count;      /* packets lost on this path */
     uint8_t path_state;            /* XQC_PATH_STATE_* */
+    uint8_t path_cc_mode;          /* xqc_cc_mode_t */
 } xqc_path_metrics_t;
 
 /**

@@ -137,6 +137,7 @@ if(HAVE_CUNIT)
         ${UNIT_TEST_DIR}/xqc_vn_test.c
         ${UNIT_TEST_DIR}/xqc_frame_type_bit_test.c
         ${UNIT_TEST_DIR}/xqc_applimit_test.c
+        ${UNIT_TEST_DIR}/xqc_path_metrics_test.c
     )
 
     if(XQC_ENABLE_FEC)

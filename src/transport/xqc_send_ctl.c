@@ -2345,6 +2345,42 @@ xqc_send_ctl_get_pacing_rate(xqc_send_ctl_t *send_ctl) {
     return xqc_pacing_rate_calc(&send_ctl->ctl_pacing);
 }
 
+_Static_assert((int)BBR2_STARTUP == (int)BBR_STARTUP
+               && (int)BBR2_DRAIN == (int)BBR_DRAIN
+               && (int)BBR2_PROBE_BW == (int)BBR_PROBE_BW
+               && (int)BBR2_PROBE_RTT == (int)BBR_PROBE_RTT,
+               "BBR and BBRv2 report their modes with the same values");
+
+/*
+ * The mode of the path's congestion controller as an xqc_cc_mode_t. BBR and
+ * BBRv2 report it through xqc_cong_ctl_info_cb; controllers without that
+ * callback have no modes.
+ */
+uint8_t
+xqc_send_ctl_get_cc_mode(xqc_send_ctl_t *send_ctl)
+{
+    const xqc_cong_ctrl_callback_t *cb = send_ctl->ctl_cong_callback;
+    if (send_ctl->ctl_cong == NULL || cb == NULL
+        || cb->xqc_cong_ctl_info_cb == NULL
+        || cb->xqc_cong_ctl_info_cb->mode == NULL)
+    {
+        return XQC_CC_MODE_NONE;
+    }
+
+    switch (cb->xqc_cong_ctl_info_cb->mode(send_ctl->ctl_cong)) {
+    case BBR_STARTUP:
+        return XQC_CC_MODE_STARTUP;
+    case BBR_DRAIN:
+        return XQC_CC_MODE_DRAIN;
+    case BBR_PROBE_BW:
+        return XQC_CC_MODE_PROBE_BW;
+    case BBR_PROBE_RTT:
+        return XQC_CC_MODE_PROBE_RTT;
+    default:
+        return XQC_CC_MODE_NONE;
+    }
+}
+
 
 void 
 xqc_send_ctl_set_next_pn_for_packet(xqc_connection_t *conn, xqc_pn_ctl_t *pn_ctl,  
