@@ -137,8 +137,8 @@ typedef struct xqc_bbr2_s {
     /* BBRv2 State */
     /* packet loss in this cycle? */
     bool                loss_in_cycle;
-    /* scb->tx.delivered ending loss round */
-    uint32_t            loss_round_delivered;
+    /* delivered bytes (total_acked) ending loss round */
+    uint64_t            loss_round_delivered;
     /* bw_lo before latest losses */
     uint32_t            undo_bw_lo;
     /* inflight_lo before latest losses */
